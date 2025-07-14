@@ -1,0 +1,5 @@
+lz4
+cryptography
+rich
+prompt_toolkit
+bleak 
