@@ -198,6 +198,7 @@ class BitchatClient:
         self.characteristic: Optional[BleakGATTCharacteristic] = None
         self.running = True
         self.background_scanner_task = None  # Track background scanner task
+        self.disconnection_callback_registered = False
         
     async def find_device(self) -> Optional[BLEDevice]:
         """Scan for BitChat service"""
@@ -213,6 +214,32 @@ class BitchatClient:
             return device
         
         return None
+    
+    def handle_disconnect(self, client: BleakClient):
+        """Handle disconnection from peer"""
+        print(f"\r\033[K\033[91m✗ Disconnected from BitChat network\033[0m")
+        print("\033[90m» Scanning for other devices...\033[0m")
+        print("> ", end='', flush=True)
+        
+        # Clear connection state
+        self.client = None
+        self.characteristic = None
+        self.peers.clear()  # Clear peer list since we're disconnected
+        self.chat_context.active_dms.clear()  # Clear DM list
+        
+        # Clear encryption keys (but keep our own keys)
+        self.encryption_service.peer_public_keys.clear()
+        self.encryption_service.peer_signing_keys.clear()
+        self.encryption_service.peer_identity_keys.clear()
+        self.encryption_service.shared_secrets.clear()
+        
+        # If in a DM, switch to public
+        if isinstance(self.chat_context.current_mode, PrivateDM):
+            self.chat_context.switch_to_public()
+        
+        # Restart background scanner if not already running
+        if not self.background_scanner_task or self.background_scanner_task.done():
+            self.background_scanner_task = asyncio.create_task(self.background_scanner())
     
     async def connect(self):
         """Connect to BitChat service"""
@@ -245,7 +272,7 @@ class BitchatClient:
         debug_println("[1] Match Found! Connecting...")
         
         try:
-            self.client = BleakClient(device.address)
+            self.client = BleakClient(device.address, disconnected_callback=self.handle_disconnect)
             await self.client.connect()
             
             # Find characteristic
@@ -340,6 +367,14 @@ class BitchatClient:
             debug_println("[!] No connection available. Message queued.")
             # In a real implementation, we might queue messages here
             return
+        
+        # Check if still connected before sending
+        if not self.client.is_connected:
+            debug_println("[!] Connection lost. Cannot send packet.")
+            # Trigger disconnection handling if not already done
+            if self.client:
+                self.handle_disconnect(self.client)
+            return
             
         if should_fragment(packet):
             await self.send_packet_with_fragmentation(packet)
@@ -352,13 +387,28 @@ class BitchatClient:
                     response=write_with_response
                 )
             except Exception as e:
+                # Check if this is a connection error
+                if "not connected" in str(e).lower():
+                    debug_println("[!] Lost connection while sending")
+                    if self.client:
+                        self.handle_disconnect(self.client)
+                    return
+                
                 # Fallback to write without response if with response fails
                 if write_with_response:
-                    await self.client.write_gatt_char(
-                        self.characteristic, 
-                        packet, 
-                        response=False
-                    )
+                    try:
+                        await self.client.write_gatt_char(
+                            self.characteristic, 
+                            packet, 
+                            response=False
+                        )
+                    except Exception as e2:
+                        if "not connected" in str(e2).lower():
+                            debug_println("[!] Lost connection while sending")
+                            if self.client:
+                                self.handle_disconnect(self.client)
+                        else:
+                            raise e2
                 else:
                     raise e
     
@@ -366,6 +416,13 @@ class BitchatClient:
         """Fragment and send large packets"""
         if not self.client or not self.characteristic:
             debug_println("[!] No connection available. Cannot send fragmented message.")
+            return
+        
+        # Check if still connected
+        if not self.client.is_connected:
+            debug_println("[!] Connection lost. Cannot send fragmented packet.")
+            if self.client:
+                self.handle_disconnect(self.client)
             return
             
         debug_println(f"[FRAG] Original packet size: {len(packet)} bytes")
@@ -400,16 +457,25 @@ class BitchatClient:
                 bytes(fragment_payload)
             )
             
-            await self.client.write_gatt_char(
-                self.characteristic,
-                fragment_packet,
-                response=False
-            )
-            
-            debug_println(f"[FRAG] ✓ Fragment {index + 1}/{total_fragments} sent")
-            
-            if index < len(chunks) - 1:
-                await asyncio.sleep(0.02)  # 20ms delay
+            try:
+                await self.client.write_gatt_char(
+                    self.characteristic,
+                    fragment_packet,
+                    response=False
+                )
+                
+                debug_println(f"[FRAG] ✓ Fragment {index + 1}/{total_fragments} sent")
+                
+                if index < len(chunks) - 1:
+                    await asyncio.sleep(0.02)  # 20ms delay
+            except Exception as e:
+                if "not connected" in str(e).lower():
+                    debug_println(f"[FRAG] Connection lost while sending fragment {index + 1}")
+                    if self.client:
+                        self.handle_disconnect(self.client)
+                    return
+                else:
+                    raise e
     
     async def notification_handler(self, sender: BleakGATTCharacteristic, data: bytes):
         """Handle incoming BLE notifications"""
@@ -456,7 +522,7 @@ class BitchatClient:
             print(f"\r\033[K\033[33m{peer_nickname} connected\033[0m\n> ", end='', flush=True)
             debug_println(f"[<-- RECV] Announce: Peer {packet.sender_id_str} is now known as '{peer_nickname}'")
             
-            # Send key exchange to new peer
+            # Always send key exchange to new peer
             debug_println(f"[CRYPTO] Sending key exchange to new peer {packet.sender_id_str}")
             key_exchange_payload = self.encryption_service.get_combined_public_key_data()
             key_exchange_packet = create_bitchat_packet(
@@ -615,6 +681,15 @@ class BitchatClient:
             try:
                 self.encryption_service.store_peer_keys(packet.sender_id_str, packet.payload)
                 debug_println(f"[CRYPTO] Key exchange completed with {packet.sender_id_str}")
+                
+                # If this is a new peer after reconnection, send our key exchange too
+                if packet.sender_id_str not in self.peers:
+                    debug_println(f"[CRYPTO] Sending key exchange response to new peer {packet.sender_id_str}")
+                    key_exchange_payload = self.encryption_service.get_combined_public_key_data()
+                    key_exchange_packet = create_bitchat_packet(
+                        self.my_peer_id, MessageType.KEY_EXCHANGE, key_exchange_payload
+                    )
+                    await self.send_packet(key_exchange_packet)
             except Exception as e:
                 debug_println(f"[CRYPTO] Key exchange failed with {packet.sender_id_str}: {e}")
         else:
@@ -636,8 +711,25 @@ class BitchatClient:
             debug_println(f"[<-- RECV] {sender_nick} left channel {channel}")
         else:
             # Peer disconnect
-            self.peers.pop(packet.sender_id_str, None)
+            disconnected_peer = self.peers.pop(packet.sender_id_str, None)
+            if disconnected_peer and disconnected_peer.nickname:
+                print(f"\r\033[K\033[33m{disconnected_peer.nickname} disconnected\033[0m\n> ", end='', flush=True)
+                
+                # Remove from active DMs
+                if disconnected_peer.nickname in self.chat_context.active_dms:
+                    del self.chat_context.active_dms[disconnected_peer.nickname]
+                    
+                # If we're in a DM with this peer, switch to public
+                if isinstance(self.chat_context.current_mode, PrivateDM) and \
+                   self.chat_context.current_mode.peer_id == packet.sender_id_str:
+                    self.chat_context.switch_to_public()
+                    print("\033[90m» Switched to public chat (peer disconnected)\033[0m\n> ", end='', flush=True)
+                    
             debug_println(f"[<-- RECV] Peer {packet.sender_id_str} ({payload_str}) has left")
+            
+            # If this was the last peer, we might be alone now
+            if len(self.peers) == 0:
+                print("\033[90m» You're now the only one in the network.\033[0m\n> ", end='', flush=True)
     
     async def handle_channel_announce(self, packet: BitchatPacket):
         """Handle channel announcement"""
@@ -799,6 +891,14 @@ class BitchatClient:
             return
         
         if line == "/exit":
+            # Send leave notification if connected
+            if self.client and self.client.is_connected:
+                leave_packet = create_bitchat_packet(
+                    self.my_peer_id, MessageType.LEAVE, self.nickname.encode()
+                )
+                await self.send_packet(leave_packet)
+                await asyncio.sleep(0.1)  # Give time for the packet to send
+            
             await self.save_app_state()
             self.running = False
             return
@@ -1479,7 +1579,7 @@ class BitchatClient:
                 if device:
                     print(f"\r\033[K\033[92m» Found a BitChat device! Connecting...\033[0m")
                     try:
-                        self.client = BleakClient(device.address)
+                        self.client = BleakClient(device.address, disconnected_callback=self.handle_disconnect)
                         await self.client.connect()
                         
                         # Find characteristic
@@ -1496,6 +1596,9 @@ class BitchatClient:
                             # Subscribe to notifications
                             await self.client.start_notify(self.characteristic, self.notification_handler)
                             print(f"\r\033[K\033[92m✓ Connected to BitChat network!\033[0m")
+                            
+                            # Clear any stale peers from previous connection
+                            self.peers.clear()
                             
                             # Send handshake
                             key_exchange_payload = self.encryption_service.get_combined_public_key_data()
@@ -1514,6 +1617,8 @@ class BitchatClient:
                             print("> ", end='', flush=True)
                     except Exception as e:
                         debug_println(f"[SCANNER] Connection attempt failed: {e}")
+                        self.client = None
+                        self.characteristic = None
             
             # Wait before next scan
             await asyncio.sleep(5)  # Scan every 5 seconds when not connected
@@ -1562,6 +1667,17 @@ class BitchatClient:
         finally:
             debug_println("\n[+] Disconnecting...")
             self.running = False
+            
+            # Send leave notification if connected
+            if self.client and self.client.is_connected:
+                try:
+                    leave_packet = create_bitchat_packet(
+                        self.my_peer_id, MessageType.LEAVE, self.nickname.encode()
+                    )
+                    await self.send_packet(leave_packet)
+                    await asyncio.sleep(0.1)  # Give time for the packet to send
+                except:
+                    pass  # Ignore errors during shutdown
             
             # Cancel background scanner
             if scanner_task:
