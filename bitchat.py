@@ -189,7 +189,7 @@ class BitchatClient:
         self.app_state = AppState()
         self.blocked_peers: Set[str] = set()
         self.channel_creators: Dict[str, str] = {}
-        self.password_protected_channels: Set[str] = set()
+        self.password_protected_channels: Set[str] = {}
         self.channel_key_commitments: Dict[str, str] = {}
         self.discovered_channels: Set[str] = set()
         self.encryption_service = EncryptionService()
@@ -206,10 +206,12 @@ class BitchatClient:
             service_uuids=[BITCHAT_SERVICE_UUID]
         )
         
-        for device in devices:
-            debug_full_println(f"Found device: {device.name} - {device.address}")
-            return device
-        
+        # If you want to filter for a specific device, do it here
+        # For now, just return the first device if any are found
+        if devices:
+            for device in devices:
+                debug_full_println(f"Found device: {device.name} - {device.address}")
+            return devices[0]
         return None
     
     async def connect(self):
@@ -339,7 +341,7 @@ class BitchatClient:
         """Fragment and send large packets"""
         debug_println(f"[FRAG] Original packet size: {len(packet)} bytes")
         
-        fragment_size = 150  # Conservative size for iOS BLE
+        fragment_size = 150  # Conservative size for iOS
         chunks = [packet[i:i+fragment_size] for i in range(0, len(packet), fragment_size)]
         total_fragments = len(chunks)
         
