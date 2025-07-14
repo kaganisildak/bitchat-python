@@ -178,20 +178,20 @@ def format_message_display(
     time_str = timestamp.strftime("%H:%M")
     
     if is_private:
-        # Orange for private messages
+        # Orange for private messages (matching iOS)
         if sender == my_nickname:
-            # Message I sent
+            # Message I sent - use brighter orange
             if recipient:
                 return f"\033[2;38;5;208m[{time_str}|DM]\033[0m \033[38;5;214m<you → {recipient}>\033[0m {content}"
             else:
                 return f"\033[2;38;5;208m[{time_str}|DM]\033[0m \033[38;5;214m<you → ???>\033[0m {content}"
         else:
-            # Message I received
+            # Message I received - use normal orange
             return f"\033[2;38;5;208m[{time_str}|DM]\033[0m \033[38;5;208m<{sender} → you>\033[0m {content}"
     elif is_channel:
-        # Blue for channel messages
+        # Blue for channel messages (matching iOS)
         if sender == my_nickname:
-            # My messages - light blue
+            # My messages - light blue (256-color)
             if channel_name:
                 return f"\033[2;34m[{time_str}|{channel_name}]\033[0m \033[38;5;117m<{sender} @ {channel_name}>\033[0m {content}"
             else:
@@ -203,9 +203,9 @@ def format_message_display(
             else:
                 return f"\033[2;34m[{time_str}|Ch]\033[0m \033[34m<{sender} @ ???>\033[0m {content}"
     else:
-        # Public message - green
+        # Public message - green for metadata
         if sender == my_nickname:
-            # My messages - light green
+            # My messages - light green (256-color)
             return f"\033[2;32m[{time_str}]\033[0m \033[38;5;120m<{sender}>\033[0m {content}"
         else:
             # Other users - normal green

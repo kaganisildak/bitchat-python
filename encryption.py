@@ -53,7 +53,21 @@ class EncryptionService:
         ))
         return bytes(data)
     
-
+    def store_peer_keys(self, peer_id: str, key_data: bytes):
+        """Store peer's public keys from key exchange"""
+        if len(key_data) < 96:
+            raise EncryptionError(f"Invalid key data size: {len(key_data)} (expected 96)")
+        
+        # Parse X25519 public key (first 32 bytes)
+        public_key_bytes = key_data[0:32]
+        signing_key_bytes = key_data[32:64]
+        identity_key_bytes = key_data[64:96]
+        
+        # Parse X25519 key
+        try:
+            public_key = X25519PublicKey.from_public_bytes(public_key_bytes)
+        except Exception:
+            raise EncryptionError("Invalid X25519 public key")
         
         # Parse Ed25519 signing key
         try:
