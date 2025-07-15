@@ -14,16 +14,47 @@ A Python implementation of the BitChat decentralized, peer-to-peer, encrypted ch
   * [Setup environment](#clone-and-setup-editable-environment-using-uv)
   * [Build](#build-sdist-and-wheel)
 
+## Installation
+With pip
+```shell
+pip install git+https://github.com/kaganisildak/bitchat-python
+```
+
+With [`uv` package and project manager](https://docs.astral.sh/uv/)
+```Shell
+uv tool install git+https://github.com/kaganisildak/bitchat-python.git
+```
+
+With [`pipx` standalone python apps panager](https://github.com/pypa/pipx)
+```Shell
+pipx install git+https://github.com/kaganisildak/bitchat-python.git
+```
 
 
 ## Usage
 
 ### Simple start
+Installed with `pip`, `uv tool`, `pipx` 
 ```Shell
-python3 bitchat.py
+bitchat-python
 ```
 
+With `uvx` command
+> [!NOTE]
+> This will only work once the project is published to the PyPI index.
+```Shell
+uvx bitchat-python
+```
 
+### CLI startup options
+```shell
+  -h, --help     show this help message and exit
+  -d, --debug    enable BASIC debug (connection info)
+  -v, --verbose  enable FULL debug (verbose output)
+  -u, --usage    show usage info
+  -V, --version  show program`s version number and exit
+  --log [LOG]    log file path. If no path is provided, logs to 'bitchat.log'. If --log is omitted, no logging occurs.
+```
 
 ### BitChat Commands
 
@@ -81,3 +112,42 @@ Privacy & Security Commands
 * `/unblock @user`     : Unblock a user
 ```
 
+
+## Clone, Develop and Build
+> [!TIP]  
+> [`uv` package and project manager](https://docs.astral.sh/uv/) usage recommended for this step
+
+### Clone and setup editable environment using `uv`
+```Shell
+git clone https://github.com/kaganisildak/bitchat-python.git
+cd bitchat-python
+uv sync --dev
+.venv/bin/activate
+```
+
+### Type checking with
+```Shell
+uv run mypy 
+```
+
+### Linting and Formatting
+Lint
+```Shell
+uv run ruff check
+```
+
+Format
+```Shell
+uv run ruff format
+```
+
+### Build sdist and wheel
+```Shell
+uv build
+```
+
+
+
+
+[//]: # (Old README.md content)
+[//]: # (pip install bleak>=0.22.3 cryptography>=44.0.0 lz4>=4.3.3 aioconsole>=0.8.1 pybloom-live>=4.0.0)

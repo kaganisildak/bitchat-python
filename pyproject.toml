@@ -1,0 +1,87 @@
+[build-system]
+requires = ["setuptools>=80.1.0", "setuptools-scm[toml]>=8"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bitchat-python"
+authors = [
+    { name = "Kağan IŞILDAK" }
+]
+description = "A Python implementation of the BitChat decentralized, peer-to-peer, encrypted chat application over BLE."
+readme = "README.md"
+requires-python = ">=3.9"
+keywords = ["bitchat", "BLE", "BLE-mesh", "IRC-vibes", "chat-application", "p2p-chat"]
+license = { file = "LICENSE" }
+classifiers = [
+    "Intended Audience :: Developers",
+    "Natural Language :: English",
+    "Programming Language :: Python",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: Implementation :: CPython",
+]
+dependencies = [
+    "aioconsole>=0.8.1",
+    "bleak>=0.22.3",
+    "cryptography>=44.0.0",
+    "pybloom-live>=4.0.0",
+
+#    "lz4>=4.3.3", # uses build-in zlib by default for minimal environments support, where only pure python and built-in modules are supported, a.g. micropython and pythonista
+#    "typing_extensions>=4.12.2; python_version<'3.11'"", # uncomment to make annotations backward compatibility
+]
+dynamic = ["version"]
+
+[project.optional-dependencies]
+full = [
+    "lz4>=4.3.3",
+]
+
+[project.urls]
+"Homepage" = "https://github.com/kaganisildak/bitchat-python"
+"Bug Reports" = "https://github.com/kaganisildak/bitchat-python/issues"
+"Source" = "https://github.com/kaganisildak/bitchat-python"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["bitchat_python*"]
+
+[tool.setuptools_scm]
+version_file = "VERSION.txt"
+
+#[tool.setuptools.dynamic]
+#version = { file = "VERSION" }
+
+# default entry point
+[project.scripts]
+bitchat-python = "bitchat_python.__main__:main"
+
+
+# # uncomment to configure pytest
+#[tool.pytest]
+#testpaths = ["tests"]
+
+[tool.mypy]
+packages = ["bitchat_python"]
+
+ # uncomment to configure ruff linter/formatter
+[tool.ruff]
+include = [
+    "pyproject.toml",
+    "src/**/*.py"
+]
+extend-exclude = ["__init__.py"]
+
+# uncomment/add deps to allow setup dev dependencies
+[dependency-groups]
+dev = [
+    "mypy>=1.15.0",
+    "ruff>=0.12.1",
+#    "pytest>=8.4.1",
+#    "pytest-cov>=6.2.1",
+]

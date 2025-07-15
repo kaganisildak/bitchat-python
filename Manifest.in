@@ -1,0 +1,4 @@
+prune tests
+include LICENSE
+include README.md
+recursive-include py.typed

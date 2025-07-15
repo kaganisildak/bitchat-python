@@ -1,6 +1,6 @@
 import os
-from enum import IntEnum
 from dataclasses import dataclass
+from enum import IntEnum
 from typing import List
 
 MAX_FRAGMENT_SIZE = 500
@@ -58,4 +58,4 @@ def fragment_payload(payload: bytes, original_msg_type: int) -> List[Fragment]:
 
 
 # Export classes and functions
-__all__ = ["Fragment", "FragmentType", "fragment_payload", "MAX_FRAGMENT_SIZE"]
+__all__ = ("Fragment", "FragmentType", "fragment_payload", "MAX_FRAGMENT_SIZE")

@@ -1,14 +1,15 @@
-import os
-import json
 import hashlib
+import json
+import os
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Set, List, Optional
-from dataclasses import dataclass, field, asdict
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from cryptography.hazmat.backends import default_backend
+
+from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+from bitchat_python._logger import logger
 
 
 @dataclass
@@ -55,8 +56,8 @@ def load_state() -> AppState:
 
     if path.exists():
         try:
-            with open(path, "r") as f:
-                data = json.load(f)
+            with open(path, "r") as fp:
+                data = json.load(fp)
 
                 # Convert lists back to sets
                 if "blocked_peers" in data:
@@ -81,7 +82,7 @@ def load_state() -> AppState:
 
                 state = AppState(**data)
         except Exception as e:
-            print(f"Warning: Could not parse state file: {e}")
+            logger.warn(f"Warning: Could not parse state file: {e}")
             state = AppState()
     else:
         state = AppState()
@@ -121,8 +122,8 @@ def save_state(state: AppState) -> None:
         },
     }
 
-    with open(path, "w") as f:
-        json.dump(data, f, indent=2)
+    with open(path, "w") as fp:
+        json.dump(data, fp, indent=2)
 
 
 def derive_encryption_key(identity_key: bytes) -> bytes:

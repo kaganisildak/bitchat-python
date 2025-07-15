@@ -4,21 +4,19 @@ Implements both Noise Protocol (XX pattern) and legacy encryption layers.
 Compatible with Swift NoiseEncryptionService implementation.
 """
 
+import hashlib
 import os
 import time
-import json
-import secrets
 from dataclasses import dataclass
 from typing import Optional, Dict, Tuple, Callable
+
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric.x25519 import (
     X25519PrivateKey,
     X25519PublicKey,
 )
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
-from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives.hmac import HMAC
-import hashlib
 
 # Noise Protocol Constants
 NOISE_PROTOCOL_NAME = "Noise_XX_25519_ChaChaPoly_SHA256"
@@ -680,7 +678,7 @@ class EncryptionService:
                 del self.handshake_states[peer_id]
             # print(f"[NOISE] Handshake failed with {peer_id}: {type(e).__name__}: {e}")
             # print(f"[NOISE] Message length: {len(message)}, first 32 bytes: {message[:32].hex()}")
-            import traceback
+            # import traceback  # FIXME: unused import
 
             # print(f"[NOISE] Handshake error details: {traceback.format_exc()}")
             # print(f"[NOISE] Original exception type: {type(e).__name__}")
