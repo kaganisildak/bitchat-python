@@ -39,6 +39,8 @@ from bitchat_python.terminal_ux import (
     clear_screen,
 )
 
+from random import randint
+
 # UUIDs
 BITCHAT_SERVICE_UUID = "f47b5e2d-4a9e-4c5a-9b3f-8e1d2c3a4b5c"
 BITCHAT_CHARACTERISTIC_UUID = "a1b2c3d4-e5f6-4a5b-8c9d-0e1f2a3b4c5d"
@@ -198,7 +200,7 @@ class FragmentCollector:
 class BitchatClient:
     def __init__(self):
         self.my_peer_id = os.urandom(4).hex()
-        self.nickname = "my-python-client"
+        self.nickname = f"anon{randint(1000, 9999)}"  # randomize default nickname
         self.peers: Dict[str, Peer] = {}
         self.bloom = BloomFilter(capacity=500, error_rate=0.01)
         self.processed_messages: Set[str] = set()  # Backup for message IDs
@@ -1002,6 +1004,15 @@ class BitchatClient:
         except Exception as e:
             logging.error(f"Failed to save state: {e}")
 
+    async def update_name(self, new_name: str):
+        self.nickname = new_name
+        announce_packet = create_bitchat_packet(
+            self.my_peer_id, MessageType.ANNOUNCE, self.nickname.encode()
+        )
+        await self.send_packet(announce_packet)
+        print(f"\033[90m» Nickname changed to: {self.nickname}\033[0m")
+        await self.save_app_state()
+
     async def handle_user_input(self, line: str):
         """Handle user input commands and messages"""
         # Number switching
@@ -1014,7 +1025,7 @@ class BitchatClient:
             return
 
         # Commands
-        if line == "/help":
+        if line in {"/help", "/h"}:
             print_usage()
             return
 
@@ -1029,6 +1040,10 @@ class BitchatClient:
 
             await self.save_app_state()
             self.running = False
+            return
+
+        if line == "/me":
+            print(f"\033[K\033[33m» Your Nickname is: {self.nickname}, peer_id: {self.my_peer_id}\033[0m")
             return
 
         if line.startswith("/name "):
@@ -1048,13 +1063,7 @@ class BitchatClient:
                 print("\033[93m⚠ Reserved nickname\033[0m")
                 print("\033[90mThis nickname is reserved and cannot be used.\033[0m")
             else:
-                self.nickname = new_name
-                announce_packet = create_bitchat_packet(
-                    self.my_peer_id, MessageType.ANNOUNCE, self.nickname.encode()
-                )
-                await self.send_packet(announce_packet)
-                print(f"\033[90m» Nickname changed to: {self.nickname}\033[0m")
-                await self.save_app_state()
+                await self.update_name(new_name)
             return
 
         if line == "/list":
@@ -1081,7 +1090,7 @@ class BitchatClient:
             logger.info(self.chat_context.get_status_line())
             return
 
-        if line in ["/online", "/w"]:
+        if line in {"/online", "/w"}:
             if not self.client or not self.client.is_connected:
                 print("» You're not connected to any peers yet.")
                 print("\033[90mWaiting for other BitChat devices...\033[0m")
@@ -1860,8 +1869,6 @@ class BitchatClient:
 
     async def run(self):
         """Main run loop"""
-        # Parse command line arguments
-        use_cli_args()
 
         # Connect to BLE
         connected = await self.connect()
@@ -1911,8 +1918,36 @@ class BitchatClient:
 # Helper functions
 
 
-def use_cli_args():
+def nickname_is_valid(new_name: str) -> bool:
+    if not new_name:
+        print("\033[93m⚠ Usage: /name <new_nickname>\033[0m")
+        print("\033[90mExample: /name Alice\033[0m")
+    elif len(new_name) > 20:
+        print("\033[93m⚠ Nickname too long\033[0m")
+        print("\033[90mMaximum 20 characters allowed.\033[0m")
+    elif not all(c.isalnum() or c in "-_" for c in new_name):
+        print("\033[93m⚠ Invalid nickname\033[0m")
+        print(
+            "\033[90mNicknames can only contain letters, numbers, hyphens and underscores.\033[0m"
+        )
+    elif new_name in ["system", "all"]:
+        print("\033[93m⚠ Reserved nickname\033[0m")
+        print("\033[90mThis nickname is reserved and cannot be used.\033[0m")
+    else:
+        return True
+    return False
+
+
+def use_cli_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser("bitchat-python")
+    parser.add_argument(
+        "-n",
+        "--name",
+        action="store",
+        type=str,
+        help="start client with specific nickname",
+    )
+    parser.add_argument("-u", "--usage", action="store_true", help="show usage info on startup")
     parser.add_argument(
         "-d",
         "--debug",
@@ -1925,7 +1960,6 @@ def use_cli_args():
         action="store_true",
         help="enable FULL debug (verbose output)",
     )
-    parser.add_argument("-u", "--usage", action="store_true", help="show usage info")
     parser.add_argument(
         "-V",
         "--version",
@@ -1960,6 +1994,7 @@ def use_cli_args():
     # print usage
     if args.usage:
         print_usage()
+    return args
 
 
 def get_banner() -> str:
@@ -2362,7 +2397,11 @@ def should_send_ack(
 
 async def main():
     """Main entry point"""
+    # Parse command line arguments
+    args = use_cli_args()
     client = BitchatClient()
+    if nickname_is_valid(args.name):
+        await client.update_name(args.name)
     await client.run()
 
 

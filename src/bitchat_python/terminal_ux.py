@@ -40,7 +40,7 @@ class Chat:
 
 @dataclass
 class ChatContext:
-    current_chat: Chat = Chat.pub()
+    current_chat: Chat = field(default_factory=Chat.pub)
     active_channels: List[str] = field(default_factory=list)
     active_dms: Dict[str, str] = field(default_factory=dict)  # nickname -> peer_id
     last_private_sender: Optional[Tuple[str, str]] = None
@@ -139,7 +139,7 @@ class ChatContext:
 
         # Public
         indicator = "→" if self.current_chat.mode is ChatMode.Public else " "
-        print(f"│ {indicator} [1] Public              │")
+        print(f"│ {indicator} [1] Public               │")
 
         # Channels
         num = 2
@@ -250,6 +250,8 @@ def get_usage() -> str:
         # General
         "\033[38;5;40m▶ General\033[0m\n"
         "  \033[36m/help\033[0m         Show this help menu\n"
+        "  \033[36m/h\033[0m            Alias for /help\n"
+        "  \033[36m/me\033[0m           Get your Nickname and peer_id\n"
         "  \033[36m/name\033[0m \033[90m<name>\033[0m  Change your nickname\n"
         "  \033[36m/status\033[0m       Show connection info\n"
         "  \033[36m/clear\033[0m        Clear the screen\n"

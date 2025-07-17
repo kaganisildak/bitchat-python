@@ -63,6 +63,8 @@ This section details the various commands available within BitChat.
 General Commands
 
 * `/help`               : Show this help menu
+* `/h`                  : Alias for /help
+* `/me`                 : Get your Nickname and peer_id
 * `/name <name>`        : Change your nickname
 * `/status`             : Show connection info
 * `/clear`              : Clear the screen
