@@ -1,7 +1,8 @@
-import logging
-import os
 import hashlib
+import os
 from typing import Dict, Optional
+
+from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
 from cryptography.hazmat.primitives.asymmetric.x25519 import (
@@ -11,7 +12,8 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import (
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-from cryptography.hazmat.backends import default_backend
+
+from bitchat_python._logger import logger
 
 
 class EncryptionError(Exception):
@@ -96,7 +98,7 @@ class EncryptionService:
             )
         except Exception as e:
             # Android bug compatibility
-            print(f"[ERROR] Identity key parse error: {e}")
+            logger.error(f"[ERROR] Identity key parse error: {e}")
             print(
                 f"[CRYPTO] Note: Peer {peer_id} appears to be Android (invalid identity key format)"
             )
@@ -183,7 +185,7 @@ class EncryptionService:
             self.peer_signing_keys[peer_id].verify(signature, data)
             return True
         except Exception as e:
-            logging.debug(e)
+            logger.debug(e)
             return False
 
     @staticmethod

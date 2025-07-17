@@ -1,12 +1,15 @@
-import os
-import json
 import hashlib
+import json
+import os
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Set, List, Optional
-from dataclasses import dataclass, field
+
 from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.asymmetric import ed25519
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+from bitchat_python._logger import logger
 
 
 @dataclass
@@ -79,7 +82,7 @@ def load_state() -> AppState:
 
                 state = AppState(**data)
         except Exception as e:
-            print(f"Warning: Could not parse state file: {e}")
+            logger.warn(f"Warning: Could not parse state file: {e}")
             state = AppState()
     else:
         state = AppState()

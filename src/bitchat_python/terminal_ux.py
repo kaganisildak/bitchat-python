@@ -240,57 +240,63 @@ def format_message_display(
             return f"\033[2;32m[{time_str}]\033[0m \033[32m<{sender}>\033[0m {content}"
 
 
-def print_help() -> None:
-    """Print help menu"""
-    print("\n\033[38;5;46m━━━ BitChat Commands ━━━\033[0m\n")
-
-    # General
-    print("\033[38;5;40m▶ General\033[0m")
-    print("  \033[36m/help\033[0m         Show this help menu")
-    print("  \033[36m/name\033[0m \033[90m<name>\033[0m  Change your nickname")
-    print("  \033[36m/status\033[0m       Show connection info")
-    print("  \033[36m/clear\033[0m        Clear the screen")
-    print("  \033[36m/exit\033[0m         Quit BitChat\n")
-
-    # Navigation
-    print("\033[38;5;40m▶ Navigation\033[0m")
-    print("  \033[36m1-9\033[0m           Quick switch to conversation")
-    print("  \033[36m/list\033[0m         Show all conversations")
-    print("  \033[36m/switch\033[0m       Interactive conversation switcher")
-    print("  \033[36m/public\033[0m       Go to public chat\n")
-
-    # Messaging
-    print("\033[38;5;40m▶ Messaging\033[0m")
-    print("  \033[90m(type normally to send in current mode)\033[0m")
-    print("  \033[36m/dm\033[0m \033[90m<name>\033[0m    Start private conversation")
-    print("  \033[36m/dm\033[0m \033[90m<name> <msg>\033[0m Send quick private message")
-    print("  \033[36m/reply\033[0m        Reply to last private message\n")
-
-    # Channels
-    print("\033[38;5;40m▶ Channels\033[0m")
-    print("  \033[36m/j\033[0m \033[90m#channel\033[0m   Join or create a channel")
-    print("  \033[36m/j\033[0m \033[90m#channel <password>\033[0m Join with password")
-    print("  \033[36m/leave\033[0m        Leave current channel")
-    print(
-        "  \033[36m/pass\033[0m \033[90m<pwd>\033[0m   Set channel password (owner only)"
-    )
-    print(
+def get_usage() -> str:
+    """
+    Returns the BitChat help menu as a multi-line string literal.
+    """
+    usage_menu = (
+        "\n\033[38;5;46m━━━ BitChat Commands ━━━\033[0m\n"
+        "\n"
+        # General
+        "\033[38;5;40m▶ General\033[0m\n"
+        "  \033[36m/help\033[0m         Show this help menu\n"
+        "  \033[36m/name\033[0m \033[90m<name>\033[0m  Change your nickname\n"
+        "  \033[36m/status\033[0m       Show connection info\n"
+        "  \033[36m/clear\033[0m        Clear the screen\n"
+        "  \033[36m/exit\033[0m         Quit BitChat\n"
+        "\n"
+        # Navigation
+        "\033[38;5;40m▶ Navigation\033[0m\n"
+        "  \033[36m1-9\033[0m           Quick switch to conversation\n"
+        "  \033[36m/list\033[0m         Show all conversations\n"
+        "  \033[36m/switch\033[0m       Interactive conversation switcher\n"
+        "  \033[36m/public\033[0m       Go to public chat\n"
+        "\n"
+        # Messaging
+        "\033[38;5;40m▶ Messaging\033[0m\n"
+        "  \033[90m(type normally to send in current mode)\033[0m\n"
+        "  \033[36m/dm\033[0m \033[90m<name>\033[0m    Start private conversation\n"
+        "  \033[36m/dm\033[0m \033[90m<name> <msg>\033[0m Send quick private message\n"
+        "  \033[36m/reply\033[0m        Reply to last private message\n"
+        "\n"
+        # Channels
+        "\033[38;5;40m▶ Channels\033[0m\n"
+        "  \033[36m/j\033[0m \033[90m#channel\033[0m   Join or create a channel\n"
+        "  \033[36m/j\033[0m \033[90m#channel <password>\033[0m Join with password\n"
+        "  \033[36m/leave\033[0m        Leave current channel\n"
+        "  \033[36m/pass\033[0m \033[90m<pwd>\033[0m   Set channel password (owner only)\n"
         "  \033[36m/transfer\033[0m \033[90m@user\033[0m Transfer ownership (owner only)\n"
+        "\n"
+        # Discovery
+        "\033[38;5;40m▶ Discovery\033[0m\n"
+        "  \033[36m/channels\033[0m     List all discovered channels\n"
+        "  \033[36m/online\033[0m       Show who's online\n"
+        "  \033[36m/w\033[0m            Alias for /online\n"
+        "\n"
+        # Privacy & Security
+        "\033[38;5;40m▶ Privacy & Security\033[0m\n"
+        "  \033[36m/block\033[0m \033[90m@user\033[0m  Block a user\n"
+        "  \033[36m/block\033[0m        List blocked users\n"
+        "  \033[36m/unblock\033[0m \033[90m@user\033[0m Unblock a user\n"
+        "\n"
+        "\033[38;5;40m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
     )
+    return usage_menu
 
-    # Discovery
-    print("\033[38;5;40m▶ Discovery\033[0m")
-    print("  \033[36m/channels\033[0m     List all discovered channels")
-    print("  \033[36m/online\033[0m       Show who's online")
-    print("  \033[36m/w\033[0m            Alias for /online\n")
 
-    # Privacy & Security
-    print("\033[38;5;40m▶ Privacy & Security\033[0m")
-    print("  \033[36m/block\033[0m \033[90m@user\033[0m  Block a user")
-    print("  \033[36m/block\033[0m        List blocked users")
-    print("  \033[36m/unblock\033[0m \033[90m@user\033[0m Unblock a user\n")
-
-    print("\033[38;5;40m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m")
+def print_usage() -> None:
+    """Print help menu"""
+    print(get_usage())
 
 
 def clear_screen() -> None:
@@ -304,6 +310,7 @@ __all__ = (
     "Chat",
     "ChatContext",
     "format_message_display",
-    "print_help",
+    'get_usage',
+    "print_usage",
     "clear_screen",
 )

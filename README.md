@@ -6,7 +6,10 @@ A Python implementation of the BitChat decentralized, peer-to-peer, encrypted ch
 
 ## Table of contents
 * [Installation](#installation)
-* [Simple start](#simple-start)
+* [Usage](#usage)
+  * [Simple start](#simple-start)
+  * [CLI startup options](#cli-startup-args)
+  * [BitChat Commands](#bitchat-commands)
 * [Clone, Develop and Build](#clone-develop-and-build)
   * [Setup environment](#clone-and-setup-editable-environment-using-uv)
   * [Build](#build-sdist-and-wheel)
@@ -28,7 +31,9 @@ pipx install git+https://github.com/kaganisildak/bitchat-python.git
 ```
 
 
-## Simple start
+## Usage
+
+### Simple start
 Installed with `pip`, `uv tool`, `pipx` 
 ```Shell
 bitchat-python
@@ -39,6 +44,69 @@ With `uvx` command
 > This will only work once the project is published to the PyPI index.
 ```Shell
 uvx bitchat-python
+```
+
+### CLI startup options
+```shell
+  -h, --help     show this help message and exit
+  -d, --debug    enable BASIC debug (connection info)
+  -v, --verbose  enable FULL debug (verbose output)
+  -u, --usage    show usage info
+  -V, --version  show program`s version number and exit
+  --log [LOG]    log file path. If no path is provided, logs to 'bitchat.log'. If --log is omitted, no logging occurs.
+```
+
+### BitChat Commands
+
+This section details the various commands available within BitChat.
+```shell
+General Commands
+
+* `/help`               : Show this help menu
+* `/name <name>`        : Change your nickname
+* `/status`             : Show connection info
+* `/clear`              : Clear the screen
+* `/exit`               : Quit BitChat
+
+
+Navigation Commands
+
+* `1-9`                 : Quick switch to conversation
+* `/list`               : Show all conversations
+* `/switch`             : Interactive conversation switcher
+* `/public`             : Go to public chat
+
+
+Messaging Commands
+
+(Type normally to send in current mode)
+
+* `/dm <name>`          : Start private conversation
+* `/dm <name> <msg>`    : Send quick private message
+* `/reply`              : Reply to last private message
+
+
+Channel Commands
+
+* `/j #channel`               : Join or create a channel
+* `/j #channel <password>`    : Join with password
+* `/leave`                    : Leave current channel
+* `/pass <pwd>`               : Set channel password (owner only)
+* `/transfer @user`           : Transfer ownership (owner only)
+
+
+Discovery Commands
+
+* `/channels`                 : List all discovered channels
+* `/online`                   : Show who`s online
+* `/w`                        : Alias for `/online`
+
+
+Privacy & Security Commands
+
+* `/block @user`       : Block a user
+* `/block`             : List blocked users
+* `/unblock @user`     : Unblock a user
 ```
 
 

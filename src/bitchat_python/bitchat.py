@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import argparse
 import asyncio
 import hashlib
 import json
@@ -6,12 +7,12 @@ import logging
 import os
 import random
 import struct
-import sys
 import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from enum import IntEnum
+from pathlib import Path
 from typing import Optional, Dict, List, Tuple, Set
 
 import aioconsole  # type: ignore[import-untyped]
@@ -19,6 +20,8 @@ from bleak import BleakClient, BleakScanner, BleakGATTCharacteristic
 from bleak.backends.device import BLEDevice
 from pybloom_live import BloomFilter  # type: ignore[import-untyped]
 
+from bitchat_python._logger import logger, enable_file_logging
+from bitchat_python._version import __version__
 from bitchat_python.compression import decompress
 from bitchat_python.encryption import EncryptionService, EncryptionError
 from bitchat_python.persistence import (
@@ -32,12 +35,9 @@ from bitchat_python.terminal_ux import (
     ChatContext,
     ChatMode,
     format_message_display,
-    print_help,
+    print_usage,
     clear_screen,
 )
-
-# Version
-VERSION = "v1.0.0"
 
 # UUIDs
 BITCHAT_SERVICE_UUID = "f47b5e2d-4a9e-4c5a-9b3f-8e1d2c3a4b5c"
@@ -63,26 +63,6 @@ MSG_FLAG_IS_ENCRYPTED = 0x80
 
 SIGNATURE_SIZE = 64
 BROADCAST_RECIPIENT = b"\xff" * 8
-
-
-# Debug levels
-class DebugLevel(IntEnum):
-    CLEAN = 0
-    BASIC = 1
-    FULL = 2
-
-
-DEBUG_LEVEL = DebugLevel.CLEAN
-
-
-def debug_println(*args, **kwargs) -> None:
-    if DEBUG_LEVEL >= DebugLevel.BASIC:
-        print(*args, **kwargs)
-
-
-def debug_full_println(*args, **kwargs) -> None:
-    if DEBUG_LEVEL >= DebugLevel.FULL:
-        print(*args, **kwargs)
 
 
 # Message types
@@ -170,12 +150,12 @@ class FragmentCollector:
     ) -> Optional[Tuple[bytes, str]]:
         fragment_id_hex = fragment_id.hex()
 
-        debug_full_println(
+        logger.debug(
             f"[COLLECTOR] Adding fragment {index + 1}/{total} for ID {fragment_id_hex[:8]}"
         )
 
         if fragment_id_hex not in self.fragments:
-            debug_full_println(
+            logger.debug(
                 f"[COLLECTOR] Creating new fragment collection for ID {fragment_id_hex[:8]}"
             )
             self.fragments[fragment_id_hex] = {}
@@ -183,25 +163,25 @@ class FragmentCollector:
 
         fragment_map = self.fragments[fragment_id_hex]
         fragment_map[index] = data
-        debug_full_println(
+        logger.debug(
             f"[COLLECTOR] Fragment {index + 1} stored. Have {len(fragment_map)}/{total} fragments"
         )
 
         if len(fragment_map) == total:
-            debug_full_println("[COLLECTOR] ✓ All fragments received! Reassembling...")
+            logger.debug("[COLLECTOR] ✓ All fragments received! Reassembling...")
 
             complete_data = bytearray()
             for i in range(total):
                 if i in fragment_map:
-                    debug_full_println(
+                    logger.debug(
                         f"[COLLECTOR] Appending fragment {i + 1} ({len(fragment_map[i])} bytes)"
                     )
                     complete_data.extend(fragment_map[i])
                 else:
-                    debug_full_println(f"[COLLECTOR] ✗ Missing fragment {i + 1}")
+                    logger.debug(f"[COLLECTOR] ✗ Missing fragment {i + 1}")
                     return None
 
-            debug_full_println(
+            logger.debug(
                 f"[COLLECTOR] ✓ Reassembly complete: {len(complete_data)} bytes total"
             )
 
@@ -242,14 +222,14 @@ class BitchatClient:
     @staticmethod
     async def find_device() -> Optional[BLEDevice]:
         """Scan for BitChat service"""
-        debug_println("[1] Scanning for bitchat service...")
+        logger.info("[1] Scanning for bitchat service...")
 
         devices = await BleakScanner.discover(
             timeout=5.0, service_uuids=[BITCHAT_SERVICE_UUID]
         )
 
         for device in devices:
-            debug_full_println(f"Found device: {device.name} - {device.address}")
+            logger.debug(f"Found device: {device.name} - {device.address}")
             return device
 
         return None
@@ -312,7 +292,7 @@ class BitchatClient:
             return False
 
         print("\033[90m» Found bitchat service! Connecting...\033[0m")
-        debug_println("[1] Match Found! Connecting...")
+        logger.info("[1] Match Found! Connecting...")
 
         try:
             self.client = BleakClient(
@@ -329,7 +309,7 @@ class BitchatClient:
                 for char in service.characteristics:
                     if char.uuid.lower() == BITCHAT_CHARACTERISTIC_UUID.lower():
                         self.characteristic = char
-                        debug_println(f"[2] Found characteristic: {char.uuid}")
+                        logger.info(f"[2] Found characteristic: {char.uuid}")
                         break
                 if self.characteristic:
                     break
@@ -342,7 +322,7 @@ class BitchatClient:
                 self.characteristic, self.notification_handler
             )
 
-            debug_println("[2] Connection established.")
+            logger.info("[2] Connection established.")
             return True
 
         except Exception as e:
@@ -357,7 +337,7 @@ class BitchatClient:
 
     async def handshake(self):
         """Perform initial handshake"""
-        debug_println("[3] Performing handshake...")
+        logger.info("[3] Performing handshake...")
 
         # Load persisted state
         self.app_state = load_state()
@@ -384,9 +364,9 @@ class BitchatClient:
             )
             await self.send_packet(announce_packet)
 
-            debug_println("[3] Handshake sent. You can now chat.")
+            logger.info("[3] Handshake sent. You can now chat.")
         else:
-            debug_println("[3] No connection yet. Skipping handshake.")
+            logger.info("[3] No connection yet. Skipping handshake.")
             print("\033[90m» Running in offline mode. Waiting for peers...\033[0m")
 
         if self.app_state.nickname:
@@ -411,22 +391,22 @@ class BitchatClient:
                     )
                     key = EncryptionService.derive_channel_key(password, channel)
                     self.channel_keys[channel] = key
-                    debug_println(
+                    logger.info(
                         f"[CHANNEL] Restored key for password-protected channel: {channel}"
                     )
                 except Exception as e:
-                    debug_println(f"[CHANNEL] Failed to restore key for {channel}: {e}")
+                    logger.info(f"[CHANNEL] Failed to restore key for {channel}: {e}")
 
     async def send_packet(self, packet: bytes):
         """Send packet, with fragmentation if needed"""
         if not self.client or not self.characteristic:
-            debug_println("[!] No connection available. Message queued.")
+            logger.info("[!] No connection available. Message queued.")
             # In a real implementation, we might queue messages here
             return
 
         # Check if still connected before sending
         if not self.client.is_connected:
-            debug_println("[!] Connection lost. Cannot send packet.")
+            logger.info("[!] Connection lost. Cannot send packet.")
             # Trigger disconnection handling if not already done
             if self.client:
                 self.handle_disconnect(self.client)
@@ -443,7 +423,7 @@ class BitchatClient:
             except Exception as e:
                 # Check if this is a connection error
                 if "not connected" in str(e).lower():
-                    debug_println("[!] Lost connection while sending")
+                    logger.info("[!] Lost connection while sending")
                     if self.client:
                         self.handle_disconnect(self.client)
                     return
@@ -456,7 +436,7 @@ class BitchatClient:
                         )
                     except Exception as e2:
                         if "not connected" in str(e2).lower():
-                            debug_println("[!] Lost connection while sending")
+                            logger.info("[!] Lost connection while sending")
                             if self.client:
                                 self.handle_disconnect(self.client)
                         else:
@@ -467,19 +447,17 @@ class BitchatClient:
     async def send_packet_with_fragmentation(self, packet: bytes):
         """Fragment and send large packets"""
         if not self.client or not self.characteristic:
-            debug_println(
-                "[!] No connection available. Cannot send fragmented message."
-            )
+            logger.info("[!] No connection available. Cannot send fragmented message.")
             return
 
         # Check if still connected
         if not self.client.is_connected:
-            debug_println("[!] Connection lost. Cannot send fragmented packet.")
+            logger.info("[!] Connection lost. Cannot send fragmented packet.")
             if self.client:
                 self.handle_disconnect(self.client)
             return
 
-        debug_println(f"[FRAG] Original packet size: {len(packet)} bytes")
+        logger.info(f"[FRAG] Original packet size: {len(packet)} bytes")
 
         fragment_size = 150  # Conservative size for iOS BLE
         chunks = [
@@ -488,8 +466,8 @@ class BitchatClient:
         total_fragments = len(chunks)
 
         fragment_id = os.urandom(8)
-        debug_println(f"[FRAG] Fragment ID: {fragment_id.hex()}")
-        debug_println(f"[FRAG] Total fragments: {total_fragments}")
+        logger.info(f"[FRAG] Fragment ID: {fragment_id.hex()}")
+        logger.info(f"[FRAG] Total fragments: {total_fragments}")
 
         for index, chunk in enumerate(chunks):
             if index == 0:
@@ -516,13 +494,13 @@ class BitchatClient:
                     self.characteristic, fragment_packet, response=False
                 )
 
-                debug_println(f"[FRAG] ✓ Fragment {index + 1}/{total_fragments} sent")
+                logger.info(f"[FRAG] ✓ Fragment {index + 1}/{total_fragments} sent")
 
                 if index < len(chunks) - 1:
                     await asyncio.sleep(0.02)  # 20ms delay
             except Exception as e:
                 if "not connected" in str(e).lower():
-                    debug_println(
+                    logger.info(
                         f"[FRAG] Connection lost while sending fragment {index + 1}"
                     )
                     if self.client:
@@ -543,7 +521,7 @@ class BitchatClient:
             await self.handle_packet(packet, data)
 
         except Exception as e:
-            debug_full_println(f"[ERROR] Failed to parse packet: {e}")
+            logger.debug(f"[ERROR] Failed to parse packet: {e}")
 
     async def handle_packet(self, packet: BitchatPacket, raw_data: bytes):
         """Handle incoming packet"""
@@ -582,12 +560,12 @@ class BitchatClient:
                 end="",
                 flush=True,
             )
-            debug_println(
+            logger.info(
                 f"[<-- RECV] Announce: Peer {packet.sender_id_str} is now known as '{peer_nickname}'"
             )
 
             # Always send key exchange to new peer
-            debug_println(
+            logger.info(
                 f"[CRYPTO] Sending key exchange to new peer {packet.sender_id_str}"
             )
             key_exchange_payload = (
@@ -603,7 +581,7 @@ class BitchatClient:
         # Check if sender is blocked
         fingerprint = self.encryption_service.get_peer_fingerprint(packet.sender_id_str)
         if fingerprint and fingerprint in self.blocked_peers:
-            debug_println(
+            logger.info(
                 f"[BLOCKED] Ignoring message from blocked peer: {packet.sender_id_str}"
             )
             return
@@ -632,9 +610,9 @@ class BitchatClient:
                 decrypted_payload = self.encryption_service.decrypt(
                     packet.payload, packet.sender_id_str
                 )
-                debug_println("[PRIVATE] Successfully decrypted private message!")
+                logger.info("[PRIVATE] Successfully decrypted private message!")
             except EncryptionError:
-                debug_println("[PRIVATE] Failed to decrypt private message")
+                logger.info("[PRIVATE] Failed to decrypt private message")
                 return
 
         # Parse message
@@ -673,10 +651,10 @@ class BitchatClient:
                     relay_data[2] = packet.ttl - 1
                     await self.send_packet(bytes(relay_data))
             else:
-                debug_println(f"[DUPLICATE] Ignoring duplicate message: {message.id}")
+                logger.info(f"[DUPLICATE] Ignoring duplicate message: {message.id}")
 
         except Exception as e:
-            debug_full_println(f"[ERROR] Failed to parse message: {e}")
+            logger.debug(f"[ERROR] Failed to parse message: {e}")
 
     async def display_message(
         self, message: BitchatMessage, packet: BitchatPacket, is_private: bool
@@ -712,7 +690,7 @@ class BitchatClient:
 
         # Check for cover traffic
         if is_private and display_content.startswith(COVER_TRAFFIC_PREFIX):
-            debug_println(f"[COVER] Discarding dummy message from {sender_nick}")
+            logger.info(f"[COVER] Discarding dummy message from {sender_nick}")
             return
 
         # Update chat context for private messages
@@ -777,13 +755,13 @@ class BitchatClient:
                 self.encryption_service.store_peer_keys(
                     packet.sender_id_str, packet.payload
                 )
-                debug_println(
+                logger.info(
                     f"[CRYPTO] Key exchange completed with {packet.sender_id_str}"
                 )
 
                 # If this is a new peer after reconnection, send our key exchange too
                 if packet.sender_id_str not in self.peers:
-                    debug_println(
+                    logger.info(
                         f"[CRYPTO] Sending key exchange response to new peer {packet.sender_id_str}"
                     )
                     key_exchange_payload = (
@@ -794,11 +772,11 @@ class BitchatClient:
                     )
                     await self.send_packet(key_exchange_packet)
             except Exception as e:
-                debug_println(
+                logger.info(
                     f"[CRYPTO] Key exchange failed with {packet.sender_id_str}: {e}"
                 )
         else:
-            debug_println(
+            logger.info(
                 f"[CRYPTO] Invalid key exchange payload size: {len(packet.payload)}"
             )
 
@@ -824,7 +802,7 @@ class BitchatClient:
                     flush=True,
                 )
 
-            debug_println(f"[<-- RECV] {sender_nick} left channel {channel}")
+            logger.info(f"[<-- RECV] {sender_nick} left channel {channel}")
         else:
             # Peer disconnect
             disconnected_peer = self.peers.pop(packet.sender_id_str, None)
@@ -851,7 +829,7 @@ class BitchatClient:
                         flush=True,
                     )
 
-            debug_println(
+            logger.info(
                 f"[<-- RECV] Peer {packet.sender_id_str} ({payload_str}) has left"
             )
 
@@ -874,7 +852,7 @@ class BitchatClient:
             creator_id = parts[2]
             key_commitment = parts[3] if len(parts) > 3 else ""
 
-            debug_println(
+            logger.info(
                 f"[<-- RECV] Channel announce: {channel} (protected: {is_protected}, owner: {creator_id})"
             )
 
@@ -914,7 +892,7 @@ class BitchatClient:
                 except (
                     Exception
                 ) as e:  # possible exceptions (ValueError, TypeError, EncryptionError)
-                    debug_println(f"[DECRYPT] Error occurred during decryption: {e}")
+                    logger.info(f"[DECRYPT] Error occurred during decryption: {e}")
 
             # Parse ACK
             try:
@@ -936,7 +914,7 @@ class BitchatClient:
                     )
 
             except Exception as e:
-                debug_println(f"[ACK] Failed to parse delivery ACK: {e}")
+                logger.info(f"[ACK] Failed to parse delivery ACK: {e}")
 
         elif packet.ttl > 1:
             # Relay ACK
@@ -952,7 +930,7 @@ class BitchatClient:
         if not self.delivery_tracker.should_send_ack(ack_id):
             return
 
-        debug_println(f"[ACK] Sending delivery ACK for message {message_id}")
+        logger.info(f"[ACK] Sending delivery ACK for message {message_id}")
 
         ack = DeliveryAck(
             message_id,
@@ -981,7 +959,7 @@ class BitchatClient:
             except (
                 Exception
             ) as e:  # possible exceptions: (ValueError, TypeError, EncryptionError)
-                debug_println(f"[ENCRYPT] Error occurred during encryption: {e}")
+                logger.info(f"[ENCRYPT] Error occurred during encryption: {e}")
 
         # Send ACK packet
         ack_packet = create_bitchat_packet_with_recipient(
@@ -1007,7 +985,7 @@ class BitchatClient:
         packet_data = bytearray(packet)
         packet_data[2] = 5
 
-        debug_println(f"[CHANNEL] Sending channel announce for {channel}")
+        logger.info(f"[CHANNEL] Sending channel announce for {channel}")
         await self.send_packet(bytes(packet_data))
 
     async def save_app_state(self):
@@ -1030,14 +1008,14 @@ class BitchatClient:
         if len(line) == 1 and line.isdigit():
             num = int(line)
             if self.chat_context.switch_to_number(num):
-                debug_println(self.chat_context.get_status_line())
+                logger.info(self.chat_context.get_status_line())
             else:
                 print("» Invalid conversation number")
             return
 
         # Commands
         if line == "/help":
-            print_help()
+            print_usage()
             return
 
         if line == "/exit":
@@ -1089,7 +1067,7 @@ class BitchatClient:
             if switch_input.strip().isdigit():
                 num = int(switch_input.strip())
                 if self.chat_context.switch_to_number(num):
-                    debug_println(self.chat_context.get_status_line())
+                    logger.info(self.chat_context.get_status_line())
                 else:
                     print("» Invalid selection")
             return
@@ -1100,7 +1078,7 @@ class BitchatClient:
 
         if line == "/public":
             self.chat_context.switch_to_public()
-            debug_println(self.chat_context.get_status_line())
+            logger.info(self.chat_context.get_status_line())
             return
 
         if line in ["/online", "/w"]:
@@ -1179,7 +1157,7 @@ class BitchatClient:
             if self.chat_context.last_private_sender:
                 peer_id, nickname = self.chat_context.last_private_sender
                 self.chat_context.enter_dm_mode(nickname, peer_id)
-                debug_println(self.chat_context.get_status_line())
+                logger.info(self.chat_context.get_status_line())
             else:
                 print("» No private messages received yet.")
             return
@@ -1301,7 +1279,7 @@ class BitchatClient:
                     self.app_state.encrypted_channel_passwords[channel_name] = encrypted
                     await self.save_app_state()
                 except Exception as e:
-                    debug_println(f"[CHANNEL] Failed to encrypt password: {e}")
+                    logger.info(f"[CHANNEL] Failed to encrypt password: {e}")
 
             self.chat_context.switch_to_channel_silent(channel_name)
             print("\r\033[K\033[90m─────────────────────────\033[0m")
@@ -1340,7 +1318,7 @@ class BitchatClient:
                 self.channel_keys.pop(channel_name, None)
                 print("> ", end="", flush=True)
 
-        debug_println(self.chat_context.get_status_line())
+        logger.info(self.chat_context.get_status_line())
 
     async def handle_dm_command(self, line: str):
         """Handle /dm command"""
@@ -1379,7 +1357,7 @@ class BitchatClient:
         else:
             # Enter DM mode
             self.chat_context.enter_dm_mode(target_nickname, target_peer_id)
-            debug_println(self.chat_context.get_status_line())
+            logger.info(self.chat_context.get_status_line())
 
     async def handle_block_command(self, line: str):
         """Handle /block command"""
@@ -1542,7 +1520,7 @@ class BitchatClient:
         # Claim ownership if no owner
         if not owner:
             self.channel_creators[channel] = self.my_peer_id
-            debug_println(f"[CHANNEL] Claiming ownership of {channel}")
+            logger.info(f"[CHANNEL] Claiming ownership of {channel}")
 
         # Update password
         old_key = self.channel_keys.get(channel)
@@ -1557,7 +1535,7 @@ class BitchatClient:
                 encrypted = encrypt_password(new_password, self.app_state.identity_key)
                 self.app_state.encrypted_channel_passwords[channel] = encrypted
             except Exception as e:
-                debug_println(f"[CHANNEL] Failed to encrypt password: {e}")
+                logger.info(f"[CHANNEL] Failed to encrypt password: {e}")
 
         # Calculate commitment
         commitment_hex = hashlib.sha256(new_key).hexdigest()
@@ -1587,7 +1565,7 @@ class BitchatClient:
             except (
                 Exception
             ) as e:  # possible exceptions: (TypeError, ValueError, EncryptionError)
-                debug_println(f"[CHANNEL] Failed to encrypt password: {e}")
+                logger.info(f"[CHANNEL] Failed to encrypt password: {e}")
 
         # Send channel announce
         await self.send_channel_announce(channel, True, commitment_hex)
@@ -1735,7 +1713,7 @@ class BitchatClient:
             print("\033[93m⚠ Not connected to any peers yet.\033[0m")
             return
 
-        debug_println(f"[PRIVATE] Sending encrypted message to {target_nickname}")
+        logger.info(f"[PRIVATE] Sending encrypted message to {target_nickname}")
 
         # Create message payload
         payload, message_id = create_bitchat_message_payload_full(
@@ -1755,14 +1733,14 @@ class BitchatClient:
         padded_payload = bytearray(payload)
         if 0 < padding_needed <= 255:
             padded_payload.extend([padding_needed] * padding_needed)
-            debug_println(f"[PRIVATE] Added {padding_needed} bytes of PKCS#7 padding")
+            logger.info(f"[PRIVATE] Added {padding_needed} bytes of PKCS#7 padding")
 
         # Encrypt
         try:
             encrypted = self.encryption_service.encrypt(
                 bytes(padded_payload), target_peer_id
             )
-            debug_println(f"[PRIVATE] Encrypted payload: {len(encrypted)} bytes")
+            logger.info(f"[PRIVATE] Encrypted payload: {len(encrypted)} bytes")
 
             # Sign
             signature = self.encryption_service.sign(encrypted)
@@ -1861,7 +1839,7 @@ class BitchatClient:
 
                             print("> ", end="", flush=True)
                     except Exception as e:
-                        debug_println(f"[SCANNER] Connection attempt failed: {e}")
+                        logger.info(f"[SCANNER] Connection attempt failed: {e}")
                         self.client = None
                         self.characteristic = None
 
@@ -1878,20 +1856,12 @@ class BitchatClient:
                 self.running = False
                 break
             except Exception as e:
-                debug_println(f"[ERROR] Input error: {e}")
+                logger.info(f"[ERROR] Input error: {e}")
 
     async def run(self):
         """Main run loop"""
-        print_banner()
-
         # Parse command line arguments
-        global DEBUG_LEVEL
-        if "-dd" in sys.argv or "--debug-full" in sys.argv:
-            DEBUG_LEVEL = DebugLevel.FULL
-            print("🐛 Debug mode: FULL (verbose output)")
-        elif "-d" in sys.argv or "--debug" in sys.argv:
-            DEBUG_LEVEL = DebugLevel.BASIC
-            print("🐛 Debug mode: BASIC (connection info)")
+        use_cli_args()
 
         # Connect to BLE
         connected = await self.connect()
@@ -1910,7 +1880,7 @@ class BitchatClient:
         except KeyboardInterrupt:
             pass
         finally:
-            debug_println("\n[+] Disconnecting...")
+            logger.info("\n[+] Disconnecting...")
             self.running = False
 
             # Send leave notification if connected
@@ -1922,7 +1892,7 @@ class BitchatClient:
                     await self.send_packet(leave_packet)
                     await asyncio.sleep(0.1)  # Give time for the packet to send
                 except Exception as e:  # possible exceptions: (ValueError, EncryptionError, UnicodeDecodeError)
-                    debug_println(
+                    logger.info(
                         f"[ERROR] Error occurred during shutdown: {e}"
                     )  # Ignore errors during shutdown
 
@@ -1941,28 +1911,81 @@ class BitchatClient:
 # Helper functions
 
 
-def print_banner() -> None:
-    """Print the BitChat banner"""
-    print(
-        "\n\033[38;5;46m##\\       ##\\   ##\\               ##\\                  ##\\"
+def use_cli_args():
+    parser = argparse.ArgumentParser("bitchat-python")
+    parser.add_argument(
+        "-d",
+        "--debug",
+        action="store_true",
+        help="enable BASIC debug (connection info)",
     )
-    print("## |      \\__|  ## |              ## |                 ## |")
-    print("#######\\  ##\\ ######\\    #######\\ #######\\   ######\\ ######\\")
-    print("##  __##\\ ## |\\_##  _|  ##  _____|##  __##\\  \\____##\\\\_##  _|")
-    print("## |  ## |## |  ## |    ## /      ## |  ## | ####### | ## |")
-    print("## |  ## |## |  ## |##\\ ## |      ## |  ## |##  __## | ## |##\\")
-    print("#######  |## |  \\####  |\\#######\\ ## |  ## |\\####### | \\####  |")
-    print(
-        "\\_______/ \\__|   \\____/  \\_______|\\__|  \\__| \\_______|  \\____/\033[0m"
+    parser.add_argument(
+        "-v",  # maybe better -v than -dd
+        "--verbose",  # maybe better --verbose than --debug-full
+        action="store_true",
+        help="enable FULL debug (verbose output)",
     )
-    print(
-        "\n\033[38;5;40m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
+    parser.add_argument("-u", "--usage", action="store_true", help="show usage info")
+    parser.add_argument(
+        "-V",
+        "--version",
+        action="version",
+        version=f"{parser.prog} {__version__}",
     )
-    print("\033[37mDecentralized • Encrypted • Peer-to-Peer • Open Source\033[0m")
-    print(f"\033[37m                bitchat@ the terminal {VERSION}\033[0m")
-    print(
+    parser.add_argument(
+        "--log",
+        action="store",
+        nargs="?",  # Allows 0 or 1 argument
+        type=Path,
+        help="log file path. If no path is provided, logs to 'bitchat.log'. If --log is omitted, no logging occurs.",
+        const=Path("bitchat.log"),  # Value if --log is present but no path is given
+        default=None,  # Value if --log is not present at all
+    )
+    args = parser.parse_args()
+
+    # print banner only if args parsing success
+    print_banner()
+
+    # setup logging
+    if args.log:
+        enable_file_logging(args.log)
+
+    if args.verbose:
+        logger.setLevel(logging.DEBUG)
+        logger.info("🐛 Debug mode: FULL (verbose output)")
+    elif args.debug:
+        logger.setLevel(logging.INFO)
+        logger.info("🐛 Debug mode: BASIC (connection info)")
+
+    # print usage
+    if args.usage:
+        print_usage()
+
+
+def get_banner() -> str:
+    """
+    Returns the BitChat banner as a multi-line string literal.
+    """
+    banner = (
+        "\n\033[38;5;46m##\\       ##\\   ##\\               ##\\                  ##\\\n"
+        "## |      \\__|  ## |              ## |                 ## |\n"
+        "#######\\  ##\\ ######\\    #######\\ #######\\   ######\\ ######\\\n"
+        "##  __##\\ ## |\\_##  _|  ##  _____|##  __##\\  \\____##\\\\_##  _|\n"
+        "## |  ## |## |  ## |    ## /      ## |  ## | ####### | ## |\n"
+        "## |  ## |## |  ## |##\\ ## |      ## |  ## |##  __## | ## |##\\\n"
+        "#######  |## |  \\####  |\\#######\\ ## |  ## |\\####### | \\####  |\n"
+        "\\_______/ \\__|   \\____/  \\_______|\\__|  \\__| \\_______|  \\____/\033[0m\n"
+        "\n\033[38;5;40m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m\n"
+        "\033[37mDecentralized • Encrypted • Peer-to-Peer • Open Source\033[0m\n"
+        f"\033[37m                bitchat@ the terminal {__version__}\033[0m\n"
         "\033[38;5;40m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m\n"
     )
+    return banner
+
+
+def print_banner() -> None:
+    """Print the BitChat banner"""
+    print(get_banner())
 
 
 def parse_bitchat_packet(data: bytes) -> BitchatPacket:
