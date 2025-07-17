@@ -8,6 +8,6 @@ This project is a rewrite of the original Rust-based `bitchat-terminal`.
 
 ### Using uvx
 ```bash
-uvx bitchat-python
+uvx --from git+https://github.com/kaganisildak/bitchat-python bitchat
 ```
 
