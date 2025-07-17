@@ -23,6 +23,7 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Communications :: Chat",
     "Topic :: System :: Networking",
 ]
@@ -35,13 +36,13 @@ dependencies = [
 ]
 
 [project.scripts]
-bitchat = "bitchat:cli_main"
+bitchat = "bitchat"
 
 [tool.setuptools]
 py-modules = ["bitchat", "encryption", "compression", "fragmentation", "terminal_ux", "persistence"]
 
 [project.urls]
-Homepage = "https://github.com/user/bitchat-python"
-Repository = "https://github.com/user/bitchat-python"
-Issues = "https://github.com/user/bitchat-python/issues"
+Homepage = "https://github.com/kaganisildak/bitchat-python"
+Repository = "https://github.com/kaganisildak/bitchat-python"
+Issues = "https://github.com/kaganisildak/bitchat-python/issues"
 
