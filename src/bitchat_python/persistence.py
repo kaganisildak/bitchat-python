@@ -119,8 +119,8 @@ def save_state(state: AppState) -> None:
         },
     }
 
-    with open(path, "w") as f:
-        json.dump(data, f, indent=2)
+    with open(path, "w") as fp:
+        json.dump(data, fp, indent=2)
 
 
 def derive_encryption_key(identity_key: bytes) -> bytes:

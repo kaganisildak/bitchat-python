@@ -1,51 +1,57 @@
+from dataclasses import dataclass, field
 from datetime import datetime
+from enum import Enum, auto
 from typing import Dict, List, Optional, Tuple
-from dataclasses import dataclass
+
+
+class ChatMode(Enum):
+    """Chat modes enumeration"""
+
+    Public = auto()
+    Channel = auto()
+    PrivateDM = auto()
 
 
 @dataclass
-class ChatMode:
-    """Base class for chat modes"""
+class Chat:
+    """Keeps chat mode, user or channel name, and peer_id"""
 
-    pass
+    mode: ChatMode = field(default=ChatMode.Public)  # chat mode aka type
+    name: Optional[str] = field(
+        default=None
+    )  # unified attribute for nickname/channel_name
+    peer_id: Optional[str] = field(default=None)
+
+    @classmethod
+    def pub(cls) -> "Chat":
+        """Factory method to create public chat instance"""
+        return cls(ChatMode.Public)
+
+    @classmethod
+    def chan(cls, channame: str) -> "Chat":
+        """Factory method to create channel chat instance"""
+        return cls(ChatMode.Channel, name=channame)
+
+    @classmethod
+    def private(cls, nickname: str, peer_id: str) -> "Chat":
+        """Factory method to create private chat instance"""
+        return cls(ChatMode.PrivateDM, name=nickname, peer_id=peer_id)
 
 
 @dataclass
-class Public(ChatMode):
-    """Public chat mode"""
-
-    pass
-
-
-@dataclass
-class Channel(ChatMode):
-    """Channel chat mode"""
-
-    name: str
-
-
-@dataclass
-class PrivateDM(ChatMode):
-    """Private DM mode"""
-
-    nickname: str
-    peer_id: str
-
-
 class ChatContext:
-    def __init__(self):
-        self.current_mode: ChatMode = Public()
-        self.active_channels: List[str] = []
-        self.active_dms: Dict[str, str] = {}  # nickname -> peer_id
-        self.last_private_sender: Optional[Tuple[str, str]] = None
+    current_chat: Chat = Chat.pub()
+    active_channels: List[str] = field(default_factory=list)
+    active_dms: Dict[str, str] = field(default_factory=dict)  # nickname -> peer_id
+    last_private_sender: Optional[Tuple[str, str]] = None
 
     def format_prompt(self) -> str:
-        if isinstance(self.current_mode, Public):
+        if self.current_chat.mode is ChatMode.Public:
             return "[Public]"
-        elif isinstance(self.current_mode, Channel):
-            return f"[{self.current_mode.name}]"
-        elif isinstance(self.current_mode, PrivateDM):
-            return f"[DM: {self.current_mode.nickname}]"
+        elif self.current_chat.mode is ChatMode.Channel:
+            return f"[{self.current_chat.name}]"
+        elif self.current_chat.mode is ChatMode.PrivateDM:
+            return f"[DM: {self.current_chat.name}]"
         return ">"
 
     def get_status_line(self) -> str:
@@ -62,7 +68,7 @@ class ChatContext:
 
     def switch_to_number(self, num: int) -> bool:
         if num == 1:
-            self.current_mode = Public()
+            self.current_chat = Chat.pub()
             print("\033[90m─────────────────────────\033[0m")
             print(
                 "\033[90m» Switched to Public chat. Just type to send messages.\033[0m"
@@ -74,7 +80,7 @@ class ChatContext:
             channel_idx = num - 2
             if channel_idx < len(self.active_channels):
                 channel = self.active_channels[channel_idx]
-                self.current_mode = Channel(channel)
+                self.current_chat = Chat.chan(channel)
                 print("\033[90m─────────────────────────\033[0m")
                 print(f"\033[90m» Switched to channel {channel}\033[0m")
                 return True
@@ -84,7 +90,7 @@ class ChatContext:
         dm_list = list(self.active_dms.items())
         if dm_idx < len(dm_list):
             nick, peer_id = dm_list[dm_idx]
-            self.current_mode = PrivateDM(nick, peer_id)
+            self.current_chat = Chat.private(nick, peer_id)
             print("\033[90m─────────────────────────\033[0m")
             print(
                 f"\033[90m» Switched to DM with {nick}. Just type to send messages.\033[0m"
@@ -93,54 +99,54 @@ class ChatContext:
 
         return False
 
-    def add_channel(self, channel: str):
+    def add_channel(self, channel: str) -> None:
         if channel not in self.active_channels:
             self.active_channels.append(channel)
 
-    def add_dm(self, nickname: str, peer_id: str):
+    def add_dm(self, nickname: str, peer_id: str) -> None:
         self.active_dms[nickname] = peer_id
 
-    def enter_dm_mode(self, nickname: str, peer_id: str):
+    def enter_dm_mode(self, nickname: str, peer_id: str) -> None:
         self.add_dm(nickname, peer_id)
-        self.current_mode = PrivateDM(nickname, peer_id)
+        self.current_chat = Chat.private(nickname, peer_id)
         print("\033[90m─────────────────────────\033[0m")
         print(
             f"\033[90m» Entered DM mode with {nickname}. Just type to send messages.\033[0m"
         )
 
-    def switch_to_channel(self, channel: str):
+    def switch_to_channel(self, channel: str) -> None:
         self.add_channel(channel)
-        self.current_mode = Channel(channel)
+        self.current_chat = Chat.chan(channel)
         print("\033[90m─────────────────────────\033[0m")
         print(f"\033[90m» Switched to channel {channel}\033[0m")
 
-    def switch_to_channel_silent(self, channel: str):
+    def switch_to_channel_silent(self, channel: str) -> None:
         self.add_channel(channel)
-        self.current_mode = Channel(channel)
+        self.current_chat = Chat.chan(channel)
 
-    def switch_to_public(self):
-        self.current_mode = Public()
+    def switch_to_public(self) -> None:
+        self.current_chat = Chat.pub()
         print("\033[90m─────────────────────────\033[0m")
         print("\033[90m» Switched to Public chat. Just type to send messages.\033[0m")
 
-    def remove_channel(self, channel: str):
+    def remove_channel(self, channel: str) -> None:
         if channel in self.active_channels:
             self.active_channels.remove(channel)
 
-    def show_conversation_list(self):
+    def show_conversation_list(self) -> None:
         print("\n╭─── Active Conversations ───╮")
         print("│                            │")
 
         # Public
-        indicator = "→" if isinstance(self.current_mode, Public) else " "
+        indicator = "→" if self.current_chat.mode is ChatMode.Public else " "
         print(f"│ {indicator} [1] Public              │")
 
         # Channels
         num = 2
         for channel in self.active_channels:
             is_current = (
-                isinstance(self.current_mode, Channel)
-                and self.current_mode.name == channel
+                self.current_chat is ChatMode.Channel
+                and self.current_chat.name == channel
             )
             indicator = "→" if is_current else " "
             padding = " " * (18 - len(channel))
@@ -150,8 +156,8 @@ class ChatContext:
         # DMs
         for nick, _ in self.active_dms.items():
             is_current = (
-                isinstance(self.current_mode, PrivateDM)
-                and self.current_mode.nickname == nick
+                self.current_chat.mode is ChatMode.PrivateDM
+                and self.current_chat.name == nick
             )
             indicator = "→" if is_current else " "
             dm_text = f"DM: {nick}"
@@ -234,7 +240,7 @@ def format_message_display(
             return f"\033[2;32m[{time_str}]\033[0m \033[32m<{sender}>\033[0m {content}"
 
 
-def print_help():
+def print_help() -> None:
     """Print help menu"""
     print("\n\033[38;5;46m━━━ BitChat Commands ━━━\033[0m\n")
 
@@ -287,19 +293,17 @@ def print_help():
     print("\033[38;5;40m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m")
 
 
-def clear_screen():
+def clear_screen() -> None:
     """Clear the terminal screen"""
     print("\033[2J\033[1;1H", end="")
 
 
 # Export classes
-__all__ = [
+__all__ = (
     "ChatMode",
-    "Public",
-    "Channel",
-    "PrivateDM",
+    "Chat",
     "ChatContext",
     "format_message_display",
     "print_help",
     "clear_screen",
-]
+)

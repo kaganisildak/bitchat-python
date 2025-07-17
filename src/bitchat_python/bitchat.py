@@ -14,10 +14,10 @@ from datetime import datetime
 from enum import IntEnum
 from typing import Optional, Dict, List, Tuple, Set
 
-import aioconsole
+import aioconsole  # type: ignore[import-untyped]
 from bleak import BleakClient, BleakScanner, BleakGATTCharacteristic
 from bleak.backends.device import BLEDevice
-from pybloom_live import BloomFilter
+from pybloom_live import BloomFilter  # type: ignore[import-untyped]
 
 from bitchat_python.compression import decompress
 from bitchat_python.encryption import EncryptionService, EncryptionError
@@ -31,8 +31,6 @@ from bitchat_python.persistence import (
 from bitchat_python.terminal_ux import (
     ChatContext,
     ChatMode,
-    Channel,
-    PrivateDM,
     format_message_display,
     print_help,
     clear_screen,
@@ -77,12 +75,12 @@ class DebugLevel(IntEnum):
 DEBUG_LEVEL = DebugLevel.CLEAN
 
 
-def debug_println(*args, **kwargs):
+def debug_println(*args, **kwargs) -> None:
     if DEBUG_LEVEL >= DebugLevel.BASIC:
         print(*args, **kwargs)
 
 
-def debug_full_println(*args, **kwargs):
+def debug_full_println(*args, **kwargs) -> None:
     if DEBUG_LEVEL >= DebugLevel.FULL:
         print(*args, **kwargs)
 
@@ -275,7 +273,7 @@ class BitchatClient:
         self.encryption_service.shared_secrets.clear()
 
         # If in a DM, switch to public
-        if isinstance(self.chat_context.current_mode, PrivateDM):
+        if self.chat_context.current_chat.mode is ChatMode.PrivateDM:
             self.chat_context.switch_to_public()
 
         # Restart background scanner if not already running
@@ -737,7 +735,7 @@ class BitchatClient:
 
         print(f"\r\033[K{display}")
 
-        if is_private and not isinstance(self.chat_context.current_mode, PrivateDM):
+        if is_private and self.chat_context.current_chat.mode is not ChatMode.PrivateDM:
             print("\033[90m» /reply to respond\033[0m")
 
         print("> ", end="", flush=True)
@@ -817,8 +815,8 @@ class BitchatClient:
             )
 
             if (
-                isinstance(self.chat_context.current_mode, Channel)
-                and self.chat_context.current_mode.name == channel
+                self.chat_context.current_chat.mode is ChatMode.Channel
+                and self.chat_context.current_chat.name == channel
             ):
                 print(
                     f"\r\033[K\033[90m« {sender_nick} left {channel}\033[0m\n> ",
@@ -843,8 +841,8 @@ class BitchatClient:
 
                 # If we're in a DM with this peer, switch to public
                 if (
-                    isinstance(self.chat_context.current_mode, PrivateDM)
-                    and self.chat_context.current_mode.peer_id == packet.sender_id_str
+                    self.chat_context.current_chat.mode is ChatMode.PrivateDM
+                    and self.chat_context.current_chat.peer_id == packet.sender_id_str
                 ):
                     self.chat_context.switch_to_public()
                     print(
@@ -1166,9 +1164,9 @@ class BitchatClient:
             print_banner()
             mode_name = {
                 ChatMode.Public: "public chat",
-                ChatMode.Channel: f"channel {self.chat_context.current_mode.name}",
-                ChatMode.PrivateDM: f"DM with {self.chat_context.current_mode.nickname}",
-            }.get(type(self.chat_context.current_mode), "unknown")
+                ChatMode.Channel: f"channel {self.chat_context.current_chat.name}",
+                ChatMode.PrivateDM: f"DM with {self.chat_context.current_chat.name}",
+            }.get(self.chat_context.current_chat.mode, "unknown")
             print(f"» Cleared {mode_name}")
             print("> ", end="", flush=True)
             return
@@ -1214,11 +1212,11 @@ class BitchatClient:
             return
 
         # Regular message - check mode
-        if isinstance(self.chat_context.current_mode, PrivateDM):
+        if self.chat_context.current_chat.mode is ChatMode.PrivateDM:
             await self.send_private_message(
                 line,
-                self.chat_context.current_mode.peer_id,
-                self.chat_context.current_mode.nickname,
+                self.chat_context.current_chat.peer_id,
+                self.chat_context.current_chat.name,
             )
         else:
             # Check if we're connected before sending
@@ -1482,8 +1480,8 @@ class BitchatClient:
 
     async def handle_leave_command(self):
         """Handle /leave command"""
-        if isinstance(self.chat_context.current_mode, Channel):
-            channel = self.chat_context.current_mode.name
+        if self.chat_context.current_chat.mode is ChatMode.Channel:
+            channel = self.chat_context.current_chat.name
 
             # Send leave notification
             leave_payload = channel.encode()
@@ -1516,11 +1514,11 @@ class BitchatClient:
 
     async def handle_pass_command(self, line: str):
         """Handle /pass command"""
-        if not isinstance(self.chat_context.current_mode, Channel):
+        if self.chat_context.current_chat.mode is not ChatMode.Channel:
             print("» You must be in a channel to use /pass.")
             return
 
-        channel = self.chat_context.current_mode.name
+        channel = self.chat_context.current_chat.name
         parts = line.split(maxsplit=1)
 
         if len(parts) < 2:
@@ -1616,11 +1614,11 @@ class BitchatClient:
 
     async def handle_transfer_command(self, line: str):
         """Handle /transfer command"""
-        if not isinstance(self.chat_context.current_mode, Channel):
+        if self.chat_context.current_chat.mode is not ChatMode.Channel:
             print("» You must be in a channel to use /transfer.")
             return
 
-        channel = self.chat_context.current_mode.name
+        channel = self.chat_context.current_chat.name
         parts = line.split()
 
         if len(parts) != 2:
@@ -1674,8 +1672,8 @@ class BitchatClient:
             return
 
         current_channel = None
-        if isinstance(self.chat_context.current_mode, Channel):
-            current_channel = self.chat_context.current_mode.name
+        if self.chat_context.current_chat is ChatMode.Channel:
+            current_channel = self.chat_context.current_chat.name
 
             # Check if password protected
             if (
@@ -1943,7 +1941,7 @@ class BitchatClient:
 # Helper functions
 
 
-def print_banner():
+def print_banner() -> None:
     """Print the BitChat banner"""
     print(
         "\n\033[38;5;46m##\\       ##\\   ##\\               ##\\                  ##\\"

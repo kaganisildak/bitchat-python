@@ -2,7 +2,7 @@ import asyncio
 from bitchat_python import bitchat
 
 
-def main():
+def main() -> None:
     try:
         asyncio.run(bitchat.main())
     except KeyboardInterrupt:

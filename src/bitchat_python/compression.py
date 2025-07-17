@@ -1,6 +1,6 @@
 from typing import Tuple
 
-import lz4.frame
+import lz4.frame  # type: ignore[import-untyped]
 
 COMPRESSION_THRESHOLD = 100
 
@@ -26,4 +26,4 @@ def decompress(data: bytes) -> bytes:
 
 
 # Export functions
-__all__ = ["compress_if_beneficial", "decompress", "COMPRESSION_THRESHOLD"]
+__all__ = ("compress_if_beneficial", "decompress", "COMPRESSION_THRESHOLD")
