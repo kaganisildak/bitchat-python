@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bitchat"
+version = "1.0.0"
+description = "Bluetooth Low Energy (BLE) mesh chat application"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+    {name = "Kağan IŞILDAK"}
+]
+keywords = ["bluetooth", "ble", "chat", "mesh", "communication"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Communications :: Chat",
+    "Topic :: System :: Networking",
+]
+dependencies = [
+    "bleak",
+    "aioconsole",
+    "pybloom-live",
+    "cryptography",
+    "lz4",
+]
+
+[project.scripts]
+bitchat = "bitchat"
+
+[tool.setuptools]
+py-modules = ["bitchat", "encryption", "compression", "fragmentation", "terminal_ux", "persistence"]
+
+[project.urls]
+Homepage = "https://github.com/kaganisildak/bitchat-python"
+Repository = "https://github.com/kaganisildak/bitchat-python"
+Issues = "https://github.com/kaganisildak/bitchat-python/issues"
+
