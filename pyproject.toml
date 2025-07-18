@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=80.1.0"]
+requires = ["setuptools>=80.1.0", "setuptools-scm[toml]>=8"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -45,12 +45,16 @@ dynamic = ["version"]
 where = ["src"]
 include = ["bitchat_python*"]
 
-[tool.setuptools.dynamic]
-version = { file = "VERSION" }
+[tool.setuptools_scm]
+version_file = "VERSION.txt"
+
+#[tool.setuptools.dynamic]
+#version = { file = "VERSION" }
 
 # default entry point
 [project.scripts]
 bitchat-python = "bitchat_python.__main__:main"
+
 
 # # uncomment to configure pytest
 #[tool.pytest]

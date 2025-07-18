@@ -69,6 +69,7 @@ General Commands
 * `/status`             : Show connection info
 * `/clear`              : Clear the screen
 * `/exit`               : Quit BitChat
+*  `/q`                 : Alias for /exit
 
 
 Navigation Commands
@@ -101,7 +102,7 @@ Discovery Commands
 
 * `/channels`                 : List all discovered channels
 * `/online`                   : Show who`s online
-* `/w`                        : Alias for `/online`
+* `/w`                        : Alias for /online
 
 
 Privacy & Security Commands

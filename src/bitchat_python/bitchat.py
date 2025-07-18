@@ -1015,6 +1015,10 @@ class BitchatClient:
 
     async def handle_user_input(self, line: str):
         """Handle user input commands and messages"""
+        if not line:
+            # disallow empty messages
+            return
+
         # Number switching
         if len(line) == 1 and line.isdigit():
             num = int(line)
@@ -1029,7 +1033,7 @@ class BitchatClient:
             print_usage()
             return
 
-        if line == "/exit":
+        if line in {"/exit", "/q"}:
             # Send leave notification if connected
             if self.client and self.client.is_connected:
                 leave_packet = create_bitchat_packet(
@@ -1043,7 +1047,7 @@ class BitchatClient:
             return
 
         if line == "/me":
-            print(f"\033[K\033[33m» Your Nickname is: {self.nickname}, peer_id: {self.my_peer_id}\033[0m")
+            print(f"\033[K\033[33m» Your Nickname is: {self.nickname}, Your ID: {self.my_peer_id}\033[0m")
             return
 
         if line.startswith("/name "):
@@ -1141,7 +1145,7 @@ class BitchatClient:
             print(f"│ Active DMs:      {dm_count:3}    │")
             print("│                         │")
             print(f"│ Your nickname: {self.nickname[:9]:^9}│")
-            print(f"│ Your ID: {self.my_peer_id[:8]}...│")
+            print(f"│ Your ID: {self.my_peer_id[:8]}...    │")
             print("╰─────────────────────────╯")
             print("> ", end="", flush=True)
             return
@@ -1651,6 +1655,7 @@ class BitchatClient:
 
     async def send_public_message(self, content: str):
         """Send a public or channel message"""
+
         if not self.client or not self.characteristic:
             print("\033[93m⚠ Not connected to any peers yet.\033[0m")
             print(
@@ -2400,7 +2405,7 @@ async def main():
     # Parse command line arguments
     args = use_cli_args()
     client = BitchatClient()
-    if nickname_is_valid(args.name):
+    if args.name and nickname_is_valid(args.name):
         await client.update_name(args.name)
     await client.run()
 

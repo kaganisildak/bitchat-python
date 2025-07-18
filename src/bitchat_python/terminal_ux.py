@@ -251,11 +251,12 @@ def get_usage() -> str:
         "\033[38;5;40m▶ General\033[0m\n"
         "  \033[36m/help\033[0m         Show this help menu\n"
         "  \033[36m/h\033[0m            Alias for /help\n"
-        "  \033[36m/me\033[0m           Get your Nickname and peer_id\n"
+        "  \033[36m/me\033[0m           Get your Nickname and ID\n"
         "  \033[36m/name\033[0m \033[90m<name>\033[0m  Change your nickname\n"
         "  \033[36m/status\033[0m       Show connection info\n"
         "  \033[36m/clear\033[0m        Clear the screen\n"
         "  \033[36m/exit\033[0m         Quit BitChat\n"
+        "  \033[36m/q\033[0m            Alias for /exit\n"
         "\n"
         # Navigation
         "\033[38;5;40m▶ Navigation\033[0m\n"
