@@ -1664,7 +1664,7 @@ class BitchatClient:
             return
 
         current_channel = None
-        if self.chat_context.current_chat is ChatMode.Channel:
+        if self.chat_context.current_chat.mode is ChatMode.Channel:
             current_channel = self.chat_context.current_chat.name
 
             # Check if password protected

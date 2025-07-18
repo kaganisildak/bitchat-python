@@ -18,6 +18,7 @@ formatter = logging.Formatter(BASIC_FORMAT)
 console_handler = logging.StreamHandler()
 console_handler.setLevel(logging.DEBUG)  # handler's level should be lowest
 console_handler.setFormatter(formatter)
+logger.addHandler(console_handler)
 
 
 def enable_file_logging(logfile: str = "bitchat.log", mode: str = "a") -> None:

@@ -203,7 +203,7 @@ def format_message_display(
     my_nickname: str,
 ) -> str:
     """Format a message for display"""
-    time_str = timestamp.strftime("%H:%M")
+    time_str = timestamp.strftime("%H:%M:%S")
 
     if is_private:
         # Orange for private messages (matching iOS)
