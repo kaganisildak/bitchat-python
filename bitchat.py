@@ -587,7 +587,10 @@ class BitchatClient:
     async def notification_handler(self, sender: BleakGATTCharacteristic, data: bytes):
         """Handle incoming BLE notifications"""
         try:
-            debug_full_println(f"[RAW RECV] {data.hex()}")
+            # Enhanced hex logging to match iOS format
+            hex_string = ' '.join(f'{b:02X}' for b in data)
+            debug_full_println(f"[RAW RECV] Received {len(data)} bytes")
+            debug_full_println(f"[RAW RECV] {hex_string}")
         except BlockingIOError:
             # If even debug printing fails due to blocking, just silently continue
             pass
@@ -1995,10 +1998,13 @@ class BitchatClient:
             
         debug_println(f"[PRIVATE] Sending encrypted message to {target_nickname}")
         
-        # Create message payload
+        # Create message payload - don't set is_encrypted=True since encryption happens at Noise layer
         payload, message_id = create_bitchat_message_payload_full(
-            self.nickname, content, None, True, self.my_peer_id, True, None
+            self.nickname, content, None, True, self.my_peer_id, False, None
         )
+        
+        debug_println(f"[PRIVATE] Created message payload: {len(payload)} bytes")
+        debug_println(f"[PRIVATE] Message payload hex: {payload.hex()}")
         
         # Track for delivery
         self.delivery_tracker.track_message(message_id, content, True)
@@ -2288,8 +2294,8 @@ def parse_bitchat_packet(data: bytes) -> BitchatPacket:
     SENDER_ID_SIZE = 8
     RECIPIENT_ID_SIZE = 8
     
-    # Remove padding first (like iOS BinaryProtocol.swift)
-    data = unpad_packet(data)
+    # Don't remove padding here - we need to parse the header first to know the actual packet size
+    # The iOS client expects properly structured packets with padding intact during parsing
     
     if len(data) < HEADER_SIZE + SENDER_ID_SIZE:
         raise ValueError("Packet too small")
@@ -2432,6 +2438,8 @@ def create_bitchat_packet_with_recipient(sender_id: str, recipient_id: Optional[
                                        signature: Optional[bytes]) -> bytes:
     """Create a BitChat packet with all options"""
     debug_full_println(f"[RAW SEND] Creating packet: type={msg_type.name}, payload_len={len(payload)}")
+    
+    # Create the packet first
     packet = bytearray()
     
     # Version
@@ -2486,35 +2494,38 @@ def create_bitchat_packet_with_recipient(sender_id: str, recipient_id: Optional[
         packet.extend(signature)
     
     # Apply iOS-style padding to standard block sizes for traffic analysis resistance
-    # Only pad MESSAGE and NOISE_ENCRYPTED packets - iOS might not expect handshake padding
-    if msg_type in [MessageType.MESSAGE, MessageType.NOISE_ENCRYPTED]:
-        # iOS block sizes and algorithm
-        block_sizes = [256, 512, 1024, 2048]
-        # Account for encryption overhead (~16 bytes for AES-GCM tag)
-        total_size = len(packet) + 16
-        
-        # Find smallest block that fits
-        target_size = None
-        for block_size in block_sizes:
-            if total_size <= block_size:
-                target_size = block_size
-                break
-        
-        if target_size is None:
-            # For very large messages, just use the original size (will be fragmented anyway)
-            target_size = len(packet)
-        
-        padding_needed = target_size - len(packet)
-        
-        # PKCS#7 only supports padding up to 255 bytes
-        # If we need more padding than that, don't pad - return original data
-        if 0 < padding_needed <= 255:
-            # iOS-style PKCS#7 padding: random bytes + padding length as last byte
-            padding = bytearray(os.urandom(padding_needed - 1))
-            padding.append(padding_needed)
-            packet.extend(padding)
+    # iOS pads ALL packets to 256 bytes for consistent BLE transmission
+    block_sizes = [256, 512, 1024, 2048]
+    # Account for encryption overhead (~16 bytes for AES-GCM tag)
+    total_size = len(packet) + 16
+    
+    # Find smallest block that fits
+    target_size = None
+    for block_size in block_sizes:
+        if total_size <= block_size:
+            target_size = block_size
+            break
+    
+    if target_size is None:
+        # For very large messages, just use the original size (will be fragmented anyway)
+        target_size = len(packet)
+    
+    padding_needed = target_size - len(packet)
+    
+    # PKCS#7 only supports padding up to 255 bytes
+    # If we need more padding than that, don't pad - return original data
+    if 0 < padding_needed <= 255:
+        # iOS-style PKCS#7 padding: random bytes + padding length as last byte
+        padding = bytearray(os.urandom(padding_needed - 1))
+        padding.append(padding_needed)
+        packet.extend(padding)
 
-    return bytes(packet)
+    # Add hex logging to match iOS format
+    final_packet = bytes(packet)
+    hex_string = ' '.join(f'{b:02X}' for b in final_packet)
+    debug_full_println(f"[RAW SEND] {hex_string}")
+    
+    return final_packet
 
 def create_bitchat_message_payload_full(sender: str, content: str, channel: Optional[str],
                                       is_private: bool, sender_peer_id: str, is_encrypted: bool, encrypted_content: Optional[bytes]) -> Tuple[bytes, str]:
