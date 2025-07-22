@@ -682,44 +682,74 @@ class EncryptionService:
         """Get list of peers with active sessions"""
         return list(self.sessions.keys())
     
-    # Channel encryption methods (basic implementation)
+    # Channel encryption methods (compatible with Swift implementation)
     def encrypt_for_channel(self, message: str, channel: str, key: bytes, creator_fingerprint: str) -> bytes:
-        """Encrypt message for channel"""
-        cipher = ChaCha20Poly1305(key)
-        nonce = os.urandom(12)
+        """Encrypt message for channel using AES-GCM (compatible with Swift)"""
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        
+        cipher = AESGCM(key)
+        nonce = os.urandom(12)  # 96-bit nonce for AES-GCM
         plaintext = message.encode('utf-8')
         return nonce + cipher.encrypt(nonce, plaintext, None)
     
     def decrypt_from_channel(self, data: bytes, channel: str, key: bytes, creator_fingerprint: str) -> str:
-        """Decrypt message from channel"""
+        """Decrypt message from channel using AES-GCM (compatible with Swift)"""
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        
         if len(data) < 12:
             raise ValueError("Invalid encrypted data")
         
         nonce = data[:12]
         ciphertext = data[12:]
         
-        cipher = ChaCha20Poly1305(key)
+        cipher = AESGCM(key)
         plaintext = cipher.decrypt(nonce, ciphertext, None)
         return plaintext.decode('utf-8')
     
     def encrypt_with_key(self, data: bytes, key: bytes) -> bytes:
-        """Encrypt data with a specific key"""
-        cipher = ChaCha20Poly1305(key)
+        """Encrypt data with a specific key using AES-GCM (compatible with Swift)"""
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        
+        cipher = AESGCM(key)
         nonce = os.urandom(12)
         return nonce + cipher.encrypt(nonce, data, None)
     
     @staticmethod
-    def derive_channel_key(password: str, channel: str) -> bytes:
-        """Derive a channel key from password and channel name"""
+    def derive_channel_key(password: str, channel: str, creator_fingerprint: Optional[str] = None) -> bytes:
+        """
+        Derive a channel key from password and channel name, compatible with Swift implementation.
+        
+        Args:
+            password: Channel password
+            channel: Channel name
+            creator_fingerprint: Optional fingerprint of channel creator (for salt)
+            
+        Returns:
+            32-byte derived key
+        """
         from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-        salt = channel.encode('utf-8')
+        
+        # Build salt exactly like Swift: "bitchat-channel-{channelName}-{creatorFingerprint}"
+        salt_components = f"bitchat-channel-{channel}"
+        if creator_fingerprint:
+            salt_components += f"-{creator_fingerprint}"
+        salt = salt_components.encode('utf-8')
+        
+        print(f"[CHANNEL KEY] Deriving key for {channel}")
+        print(f"[CHANNEL KEY] Password: {password[:4]}...")
+        print(f"[CHANNEL KEY] Creator fingerprint: {creator_fingerprint}")
+        print(f"[CHANNEL KEY] Salt: {salt_components}")
+        
+        # Use same parameters as Swift: 210,000 iterations
         kdf = PBKDF2HMAC(
             algorithm=hashes.SHA256(),
             length=32,
             salt=salt,
-            iterations=100000,
+            iterations=210000,  # Match Swift implementation
         )
-        return kdf.derive(password.encode('utf-8'))
+        derived_key = kdf.derive(password.encode('utf-8'))
+        print(f"[CHANNEL KEY] Derived key: {derived_key.hex()}")
+        return derived_key
     
     # def debug_handshake_state(self, peer_id: str = None):
     #     """Debug handshake and session state"""

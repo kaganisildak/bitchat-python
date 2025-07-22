@@ -61,7 +61,7 @@ class DebugLevel(IntEnum):
     BASIC = 1
     FULL = 2
 
-DEBUG_LEVEL = DebugLevel.CLEAN
+DEBUG_LEVEL = DebugLevel.BASIC
 
 def debug_println(*args, **kwargs):
     if DEBUG_LEVEL >= DebugLevel.BASIC:
@@ -212,6 +212,7 @@ class BitchatClient:
         self.password_protected_channels: Set[str] = set()
         self.channel_key_commitments: Dict[str, str] = {}
         self.discovered_channels: Set[str] = set()
+        self.channel_message_history: Dict[str, List] = {}  # Store recent messages per channel for password verification
         self.encryption_service = EncryptionService()
         self.client: Optional[BleakClient] = None
         self.characteristic: Optional[BleakGATTCharacteristic] = None
@@ -453,7 +454,15 @@ class BitchatClient:
             for channel, encrypted_password in self.app_state.encrypted_channel_passwords.items():
                 try:
                     password = decrypt_password(encrypted_password, self.app_state.identity_key)
-                    key = EncryptionService.derive_channel_key(password, channel)
+                    # Get creator fingerprint for this channel
+                    creator_id = self.channel_creators.get(channel)
+                    creator_fingerprint = None
+                    if creator_id:
+                        if creator_id == self.my_peer_id:
+                            creator_fingerprint = self.encryption_service.get_identity_fingerprint()
+                        else:
+                            creator_fingerprint = self.encryption_service.get_peer_fingerprint(creator_id)
+                    key = EncryptionService.derive_channel_key(password, channel, creator_fingerprint)
                     self.channel_keys[channel] = key
                     debug_println(f"[CHANNEL] Restored key for password-protected channel: {channel}")
                 except Exception as e:
@@ -768,21 +777,84 @@ class BitchatClient:
             self.discovered_channels.add(message.channel)
             if message.is_encrypted:
                 self.password_protected_channels.add(message.channel)
+            
+            # Store message for password verification (keep recent messages only)
+            if message.channel not in self.channel_message_history:
+                self.channel_message_history[message.channel] = []
+            self.channel_message_history[message.channel].append(message)
+            # Keep only last 10 messages per channel
+            if len(self.channel_message_history[message.channel]) > 10:
+                self.channel_message_history[message.channel] = self.channel_message_history[message.channel][-10:]
         
-        # Decrypt channel messages if we have the key
+        # Handle encrypted channel messages
         display_content = message.content
-        if message.is_encrypted and message.channel and message.channel in self.channel_keys:
-            try:
-                creator_fingerprint = self.channel_creators.get(message.channel, '')
-                decrypted = self.encryption_service.decrypt_from_channel(
-                    message.encrypted_content,
-                    message.channel,
-                    self.channel_keys[message.channel],
-                    creator_fingerprint
-                )
-                display_content = decrypted
-            except:
-                display_content = "[Encrypted message - decryption failed]"
+        if message.is_encrypted and message.channel:
+            if message.channel in self.channel_keys:
+                # We have a key, try to decrypt
+                try:
+                    creator_id = self.channel_creators.get(message.channel)
+                    creator_fingerprint = None
+                    if creator_id:
+                        if creator_id == self.my_peer_id or creator_id == self.encryption_service.get_identity_fingerprint():
+                            creator_fingerprint = self.encryption_service.get_identity_fingerprint()
+                        else:
+                            creator_fingerprint = self.encryption_service.get_peer_fingerprint(creator_id)
+                            # If creator_id is already a fingerprint, use it directly
+                            if not creator_fingerprint and len(creator_id) == 64:  # SHA256 fingerprint length
+                                creator_fingerprint = creator_id
+                    
+                    debug_println(f"[CHANNEL] Decrypting message from {message.channel}")
+                    debug_println(f"[CHANNEL] Creator ID: {creator_id}, Creator fingerprint: {creator_fingerprint}")
+                    debug_println(f"[CHANNEL] Channel key: {self.channel_keys[message.channel].hex()}")
+                    debug_println(f"[CHANNEL] Encrypted content length: {len(message.encrypted_content)}")
+                    
+                    decrypted = self.encryption_service.decrypt_from_channel(
+                        message.encrypted_content,
+                        message.channel,
+                        self.channel_keys[message.channel],
+                        creator_fingerprint or ''
+                    )
+                    display_content = decrypted
+                    debug_println(f"[CHANNEL] Successfully decrypted: {decrypted}")
+                    
+                    # Check if this was the first encrypted message (password verification)
+                    encrypted_messages = [msg for msg in self.channel_message_history[message.channel] 
+                                        if hasattr(msg, 'is_encrypted') and msg.is_encrypted]
+                    if len(encrypted_messages) == 1:  # This is the first encrypted message
+                        print(f"\r\033[K✅ Password verified successfully for channel {message.channel}")
+                        
+                except Exception as e:
+                    debug_println(f"[CHANNEL] Decryption failed: {e}")
+                    
+                    # Check if this was the first encrypted message (password verification failure)
+                    encrypted_messages = [msg for msg in self.channel_message_history[message.channel] 
+                                        if hasattr(msg, 'is_encrypted') and msg.is_encrypted]
+                    if len(encrypted_messages) == 1:  # This is the first encrypted message
+                        # Password verification failed - kick user out of channel
+                        print(f"\r\033[K❌ Password verification failed for channel {message.channel}")
+                        print(f"\033[91m» Wrong password provided. Leaving channel {message.channel}\033[0m")
+                        
+                        # Clear channel data
+                        self.channel_keys.pop(message.channel, None)
+                        self.discovered_channels.discard(message.channel)
+                        self.channel_message_history.pop(message.channel, None)
+                        
+                        # If we're currently in this channel, exit to public
+                        if isinstance(self.chat_context.current_mode, Channel) and self.chat_context.current_mode.name == message.channel:
+                            self.chat_context.current_mode = Public()
+                        
+                        print("> ", end='', flush=True)
+                        return
+                    
+                    display_content = "[Encrypted message - decryption failed]"
+            else:
+                # We don't have the key
+                # Mark channel as password protected if not already
+                if message.channel not in self.password_protected_channels:
+                    self.password_protected_channels.add(message.channel)
+                    print(f"\r\033[K🔒 Channel {message.channel} is password protected. Use /j {message.channel} <password> to join.")
+                
+                display_content = "[Encrypted message - join channel with password]"
         elif message.is_encrypted:
             display_content = "[Encrypted message - join channel with password]"
         
@@ -1118,6 +1190,27 @@ class BitchatClient:
             
             if creator_id:
                 self.channel_creators[channel] = creator_id
+                
+                # If this is a password-protected channel and we don't have a session with the creator,
+                # try to establish one for future key derivation
+                if is_protected and creator_id != self.my_peer_id:
+                    if not self.encryption_service.is_session_established(creator_id):
+                        try:
+                            debug_println(f"[NOISE] Channel {channel} is protected, initiating handshake with creator {creator_id}")
+                            handshake_msg = self.encryption_service.initiate_handshake(creator_id)
+                            
+                            # Send handshake init to creator
+                            handshake_packet = create_bitchat_packet_with_recipient(
+                                self.my_peer_id,
+                                creator_id,
+                                MessageType.NOISE_HANDSHAKE_INIT,
+                                handshake_msg,
+                                None  # No signature
+                            )
+                            await self.send_packet(handshake_packet)
+                            debug_println(f"[NOISE] Sent handshake init to channel creator {creator_id}")
+                        except Exception as e:
+                            debug_println(f"[NOISE] Failed to initiate handshake with creator: {e}")
             
             if is_protected:
                 self.password_protected_channels.add(channel)
@@ -1275,7 +1368,9 @@ class BitchatClient:
     
     async def send_channel_announce(self, channel: str, is_protected: bool, key_commitment: Optional[str]):
         """Send channel announcement"""
-        payload = f"{channel}|{'1' if is_protected else '0'}|{self.my_peer_id}|{key_commitment or ''}"
+        # Use fingerprint as creator ID to match Swift implementation
+        creator_id = self.encryption_service.get_identity_fingerprint()
+        payload = f"{channel}|{'1' if is_protected else '0'}|{creator_id}|{key_commitment or ''}"
         packet = create_bitchat_packet(
             self.my_peer_id,
             MessageType.CHANNEL_ANNOUNCE,
@@ -1286,7 +1381,7 @@ class BitchatClient:
         packet_data = bytearray(packet)
         packet_data[2] = 5
         
-        debug_println(f"[CHANNEL] Sending channel announce for {channel}")
+        debug_println(f"[CHANNEL] Sending channel announce for {channel} with creator {creator_id}")
         await self.send_packet(bytes(packet_data))
     
     async def save_app_state(self):
@@ -1529,7 +1624,7 @@ class BitchatClient:
                 await self.send_public_message(line)
     
     async def handle_join_channel(self, line: str):
-        """Handle /j command"""
+        """Handle /j command with tentative joining for password-protected channels"""
         parts = line.split()
         if len(parts) < 2:
             print("\033[93m⚠ Usage: /j #<channel> [password]\033[0m")
@@ -1555,35 +1650,72 @@ class BitchatClient:
             print("\033[90mChannel names can only contain letters, numbers, hyphens and underscores.\033[0m")
             return
         
-        # Check if password protected
-        if channel_name in self.password_protected_channels:
-            if channel_name in self.channel_keys:
-                # We have the key
-                self.discovered_channels.add(channel_name)
-                self.chat_context.switch_to_channel(channel_name)
-                print("> ", end='', flush=True)
-                return
-            
-            if not password:
-                print(f"❌ Channel {channel_name} is password-protected. Use: /j {channel_name} <password>")
-                return
-            
-            if len(password) < 4:
-                print("\033[93m⚠ Password too short\033[0m")
-                print("\033[90mMinimum 4 characters required.\033[0m")
-                return
-            
-            key = EncryptionService.derive_channel_key(password, channel_name)
-            
-            # Verify password
-            if channel_name in self.channel_key_commitments:
-                test_commitment = hashlib.sha256(key).hexdigest()
-                if test_commitment != self.channel_key_commitments[channel_name]:
-                    print(f"❌ wrong password for channel {channel_name}. please enter the correct password.")
+        # Check if already joined and we can access it
+        if channel_name in self.discovered_channels:
+            if channel_name in self.password_protected_channels and channel_name not in self.channel_keys:
+                if password:
+                    # User provided password for already-joined channel - verify it
+                    success = await self._verify_channel_password(channel_name, password)
+                    if success:
+                        self.chat_context.switch_to_channel(channel_name)
+                        print("> ", end='', flush=True)
+                    return
+                else:
+                    print(f"❌ Channel {channel_name} is password-protected. Use: /j {channel_name} <password>")
                     return
             
+            # Switch to the channel (no password needed or we have the key)
+            self.chat_context.switch_to_channel(channel_name)
+            print("> ", end='', flush=True)
+            return
+        
+        # If channel is password protected and we don't have the key yet
+        if channel_name in self.password_protected_channels and channel_name not in self.channel_keys:
+            # Check if we're the creator (can bypass password check)
+            my_fingerprint = self.encryption_service.get_identity_fingerprint()
+            creator_id = self.channel_creators.get(channel_name)
+            is_creator = (creator_id == self.my_peer_id or creator_id == my_fingerprint)
+            
+            if is_creator:
+                # Channel creator should already have the key set when they created the password
+                # This is a failsafe - just proceed without password
+                pass
+            elif password:
+                if len(password) < 4:
+                    print("\033[93m⚠ Password too short\033[0m")
+                    print("\033[90mMinimum 4 characters required.\033[0m")
+                    return
+                
+                # Try to derive and verify password
+                success = await self._verify_channel_password(channel_name, password, tentative=True)
+                if not success:
+                    return
+            else:
+                # Show password prompt and return early - don't join the channel yet
+                print(f"❌ Channel {channel_name} is password-protected. Use: /j {channel_name} <password>")
+                return
+        
+        # At this point, channel is either not password protected or we don't know yet
+        self.discovered_channels.add(channel_name)
+        
+        # Handle password for new channels
+        if password:
+            # Get creator fingerprint for key derivation
+            creator_id = self.channel_creators.get(channel_name)
+            creator_fingerprint = None
+            if creator_id:
+                if creator_id == self.my_peer_id:
+                    creator_fingerprint = self.encryption_service.get_identity_fingerprint()
+                else:
+                    creator_fingerprint = self.encryption_service.get_peer_fingerprint(creator_id)
+            else:
+                # If no creator is known and we're joining with a password, we become the creator
+                creator_fingerprint = self.encryption_service.get_identity_fingerprint()
+                self.channel_creators[channel_name] = creator_fingerprint  # Use fingerprint as creator ID like Swift
+                debug_println(f"[CHANNEL] Becoming creator of new channel: {channel_name} with fingerprint {creator_fingerprint}")
+            
+            key = EncryptionService.derive_channel_key(password, channel_name, creator_fingerprint)
             self.channel_keys[channel_name] = key
-            self.discovered_channels.add(channel_name)
             
             # Save encrypted password
             if self.app_state.identity_key:
@@ -1598,36 +1730,138 @@ class BitchatClient:
             print("\r\033[K\033[90m─────────────────────────\033[0m")
             print(f"\033[90m» Joined password-protected channel: {channel_name} 🔒\033[0m")
             
-            # Send channel announce
+            # Send channel announce with fingerprint as creator
             if channel_name in self.channel_creators:
                 key_commitment = hashlib.sha256(key).hexdigest()
                 await self.send_channel_announce(channel_name, True, key_commitment)
             
             print("> ", end='', flush=True)
         else:
-            # Not password protected
-            if password:
-                key = EncryptionService.derive_channel_key(password, channel_name)
-                self.channel_keys[channel_name] = key
-                self.discovered_channels.add(channel_name)
-                self.chat_context.switch_to_channel_silent(channel_name)
-                print("\r\033[K\033[90m─────────────────────────\033[0m")
-                print(f"\033[90m» Joined password-protected channel: {channel_name} 🔒. Just type to send messages.\033[0m")
-                
-                if channel_name in self.channel_creators:
-                    key_commitment = hashlib.sha256(key).hexdigest()
-                    await self.send_channel_announce(channel_name, True, key_commitment)
-                
-                print("> ", end='', flush=True)
-            else:
-                # Regular channel
-                self.discovered_channels.add(channel_name)
-                print("\r\033[K", end='')
-                self.chat_context.switch_to_channel(channel_name)
-                self.channel_keys.pop(channel_name, None)
-                print("> ", end='', flush=True)
+            # Regular channel
+            print("\r\033[K", end='')
+            self.chat_context.switch_to_channel(channel_name)
+            self.channel_keys.pop(channel_name, None)
+            print("> ", end='', flush=True)
         
         debug_println(self.chat_context.get_status_line())
+    
+    async def _verify_channel_password(self, channel_name: str, password: str, tentative: bool = False) -> bool:
+        """Verify channel password, optionally allowing tentative verification"""
+        # Get creator fingerprint for key derivation
+        creator_id = self.channel_creators.get(channel_name)
+        creator_fingerprint = None
+        if creator_id:
+            if creator_id == self.my_peer_id or creator_id == self.encryption_service.get_identity_fingerprint():
+                creator_fingerprint = self.encryption_service.get_identity_fingerprint()
+                debug_println(f"[CHANNEL] Using our own fingerprint as creator: {creator_fingerprint}")
+            else:
+                creator_fingerprint = self.encryption_service.get_peer_fingerprint(creator_id)
+                debug_println(f"[CHANNEL] Got creator {creator_id} fingerprint: {creator_fingerprint}")
+                if not creator_fingerprint and not tentative:
+                    # If we don't have the creator's fingerprint yet, and this isn't tentative,
+                    # we need to establish a session first
+                    print(f"⚠️  No session with creator {creator_id}, attempting to establish session...")
+                    await self._initiate_session_with_creator(creator_id)
+                    creator_fingerprint = self.encryption_service.get_peer_fingerprint(creator_id)
+                    if not creator_fingerprint:
+                        print(f"❌ Cannot establish session with creator {creator_id}")
+                        print("Channel announcement may not have been received yet")
+                        return False
+        elif not tentative:
+            print(f"❌ Cannot derive key for channel {channel_name}: Creator unknown")
+            print("Channel announcement may not have been received yet")
+            return False
+        
+        key = EncryptionService.derive_channel_key(password, channel_name, creator_fingerprint)
+        
+        # First, check if we have a key commitment to verify against
+        if channel_name in self.channel_key_commitments:
+            test_commitment = hashlib.sha256(key).hexdigest()
+            if test_commitment != self.channel_key_commitments[channel_name]:
+                print(f"❌ Wrong password for channel {channel_name}")
+                return False
+        
+        # Check if we have encrypted messages to verify against
+        password_verified = False
+        should_proceed = True
+        
+        if channel_name in self.channel_message_history and self.channel_message_history[channel_name]:
+            # Look for encrypted messages to verify against
+            encrypted_messages = [msg for msg in self.channel_message_history[channel_name] 
+                                if hasattr(msg, 'is_encrypted') and msg.is_encrypted and hasattr(msg, 'encrypted_content')]
+            
+            if encrypted_messages:
+                # Test decryption with the derived key
+                try:
+                    creator_fingerprint_for_decrypt = creator_fingerprint or ''
+                    decrypted = self.encryption_service.decrypt_from_channel(
+                        encrypted_messages[0].encrypted_content,
+                        channel_name,
+                        key,
+                        creator_fingerprint_for_decrypt
+                    )
+                    password_verified = True
+                    debug_println(f"[CHANNEL] Password verified by decrypting existing message")
+                except Exception:
+                    # Password is wrong, can't decrypt
+                    if not tentative:
+                        print(f"❌ Wrong password for channel {channel_name}")
+                    should_proceed = False
+            else:
+                # No encrypted messages yet - accept tentatively
+                if tentative:
+                    print(f"⚠️  Joined channel {channel_name}. Password will be verified when encrypted messages arrive.")
+                else:
+                    print(f"ℹ️  Joined empty channel {channel_name}. Waiting for encrypted messages to verify password.")
+        else:
+            # Empty channel - accept tentatively
+            if tentative:
+                print(f"⚠️  Joined channel {channel_name}. Password will be verified when encrypted messages arrive.")
+            else:
+                print(f"ℹ️  Joined empty channel {channel_name}. Waiting for encrypted messages to verify password.")
+        
+        # Only proceed if password verification didn't fail
+        if not should_proceed:
+            return False
+        
+        # Store the key (tentatively if not verified)
+        self.channel_keys[channel_name] = key
+        
+        # Save encrypted password
+        if self.app_state.identity_key:
+            try:
+                encrypted = encrypt_password(password, self.app_state.identity_key)
+                self.app_state.encrypted_channel_passwords[channel_name] = encrypted
+                await self.save_app_state()
+            except Exception as e:
+                debug_println(f"[CHANNEL] Failed to encrypt password: {e}")
+        
+        if password_verified:
+            print(f"✅ Password verified successfully for channel {channel_name}")
+        
+        return True
+    
+    async def _initiate_session_with_creator(self, creator_id: str):
+        """Attempt to initiate a Noise session with the channel creator"""
+        try:
+            debug_println(f"[CHANNEL] Initiating session with creator {creator_id}")
+            handshake_message = self.encryption_service.initiate_handshake(creator_id)
+            
+            # Send handshake init with recipient
+            packet = create_bitchat_packet_with_recipient(
+                self.my_peer_id,
+                creator_id,
+                MessageType.NOISE_HANDSHAKE_INIT,
+                handshake_message,
+                None  # No signature
+            )
+            await self.send_packet(packet)
+            
+            # Wait a bit for the handshake to complete
+            await asyncio.sleep(1.0)
+            
+        except Exception as e:
+            debug_println(f"[CHANNEL] Failed to initiate session with creator {creator_id}: {e}")
     
     async def handle_dm_command(self, line: str):
         """Handle /dm command"""
@@ -1817,7 +2051,9 @@ class BitchatClient:
         
         # Update password
         old_key = self.channel_keys.get(channel)
-        new_key = EncryptionService.derive_channel_key(new_password, channel)
+        # Since we're the owner, use our own fingerprint
+        creator_fingerprint = self.encryption_service.get_identity_fingerprint()
+        new_key = EncryptionService.derive_channel_key(new_password, channel, creator_fingerprint)
         
         self.channel_keys[channel] = new_key
         self.password_protected_channels.add(channel)
@@ -1930,8 +2166,19 @@ class BitchatClient:
         # Create message payload
         if current_channel and current_channel in self.channel_keys:
             # Encrypted channel message
-            creator_fingerprint = self.channel_creators.get(current_channel, '')
-            encrypted_content = self.encryption_service.encrypt_for_channel(content, current_channel, self.channel_keys[current_channel], creator_fingerprint)
+            creator_id = self.channel_creators.get(current_channel)
+            creator_fingerprint = None
+            if creator_id:
+                if creator_id == self.my_peer_id:
+                    creator_fingerprint = self.encryption_service.get_identity_fingerprint()
+                else:
+                    creator_fingerprint = self.encryption_service.get_peer_fingerprint(creator_id)
+            
+            debug_println(f"[CHANNEL] Sending encrypted message to {current_channel}")
+            debug_println(f"[CHANNEL] Creator ID: {creator_id}, Creator fingerprint: {creator_fingerprint}")
+            debug_println(f"[CHANNEL] Channel key: {self.channel_keys[current_channel].hex()}")
+            
+            encrypted_content = self.encryption_service.encrypt_for_channel(content, current_channel, self.channel_keys[current_channel], creator_fingerprint or '')
             payload, message_id = create_bitchat_message_payload_full(
                 self.nickname, content, current_channel, False, self.my_peer_id, True, encrypted_content
             )
