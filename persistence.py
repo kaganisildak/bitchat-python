@@ -30,7 +30,7 @@ class AppState:
 def get_state_file_path() -> Path:
     """Get the state file path"""
     home = Path.home()
-    bitchat_dir = home / ".bitchatx"
+    bitchat_dir = home / ".bitchatxx"
     bitchat_dir.mkdir(exist_ok=True)
     return bitchat_dir / "state.json"
 
