@@ -856,6 +856,7 @@ class BitchatClient:
         if message.is_encrypted and message.channel and message.channel in self.channel_keys:
             try:
                 creator_fingerprint = self.channel_creators.get(message.channel, '')
+                debug_println(f"[CHANNEL] Decrypting message in {message.channel} using creator fingerprint: {creator_fingerprint}")
                 decrypted = self.encryption_service.decrypt_from_channel(
                     message.encrypted_content,
                     message.channel,
@@ -863,7 +864,9 @@ class BitchatClient:
                     creator_fingerprint
                 )
                 display_content = decrypted
-            except:
+                debug_println(f"[CHANNEL] Successfully decrypted message in {message.channel}: {display_content}")
+            except Exception as e:
+                debug_println(f"[CHANNEL] Failed to decrypt message in {message.channel}: {e}")
                 display_content = "[Encrypted message - decryption failed]"
         elif message.is_encrypted:
             display_content = "[Encrypted message - join channel with password]"
@@ -1179,8 +1182,27 @@ class BitchatClient:
                 # If it's an InvalidTag error, it might be a nonce sync issue
                 if "InvalidTag" in str(e):
                     debug_println(f"[NOISE] InvalidTag suggests nonce desync - this could be from iOS sending acknowledgments")
-                    # Don't reset the session here, just log it
-                    # The nonce is already incremented by the failed decrypt attempt
+                    debug_println(f"[NOISE] Attempting to reset session and re-establish handshake")
+                    # Clear the session and force re-handshake
+                    self.encryption_service.remove_session(packet.sender_id_str)
+                    self.encryption_service.clear_handshake_state(packet.sender_id_str)
+                    
+                    # If this peer is in our peers list, try to re-initiate handshake
+                    if packet.sender_id_str in self.peers:
+                        debug_println(f"[NOISE] Re-initiating handshake with {packet.sender_id_str}")
+                        try:
+                            if self.my_peer_id < packet.sender_id_str:
+                                # We should initiate
+                                handshake_message = self.encryption_service.initiate_handshake(packet.sender_id_str)
+                                handshake_packet = create_bitchat_packet_with_recipient(
+                                    self.my_peer_id, packet.sender_id_str, MessageType.NOISE_HANDSHAKE_INIT, handshake_message, None
+                                )
+                                handshake_data = bytearray(handshake_packet)
+                                handshake_data[2] = 3
+                                await self.send_packet(bytes(handshake_data))
+                                debug_println(f"[NOISE] Re-sent handshake init to {packet.sender_id_str}")
+                        except Exception as handshake_e:
+                            debug_println(f"[NOISE] Failed to re-initiate handshake: {handshake_e}")
     
     async def handle_leave(self, packet: BitchatPacket):
         """Handle leave notification"""
@@ -1239,17 +1261,27 @@ class BitchatClient:
             
             debug_println(f"[<-- RECV] Channel announce: {channel} (protected: {is_protected}, owner: {creator_id})")
             
+            # Don't overwrite our own ownership (matching Swift logic)
+            my_fingerprint = self.encryption_service.get_my_fingerprint()
+            existing_creator = self.channel_creators.get(channel)
+            
             if creator_id:
-                self.channel_creators[channel] = creator_id
+                if existing_creator is None or (existing_creator != self.my_peer_id and existing_creator != my_fingerprint):
+                    self.channel_creators[channel] = creator_id
+                    debug_println(f"[CHANNEL] Updated creator for {channel} to {creator_id}")
+                else:
+                    debug_println(f"[CHANNEL] Keeping existing creator for {channel}: {existing_creator} (ignoring {creator_id})")
             
             if is_protected:
                 self.password_protected_channels.add(channel)
                 if key_commitment:
                     self.channel_key_commitments[channel] = key_commitment
+                    debug_println(f"[CHANNEL] Stored key commitment for {channel}: {key_commitment}")
             else:
                 self.password_protected_channels.discard(channel)
                 self.channel_keys.pop(channel, None)
                 self.channel_key_commitments.pop(channel, None)
+                debug_println(f"[CHANNEL] Removed protection from {channel}")
             
             self.chat_context.add_channel(channel)
             await self.save_app_state()
@@ -1965,7 +1997,6 @@ class BitchatClient:
                     debug_println(f"[CHANNEL] Actual: {test_commitment}")
                     debug_println(f"[CHANNEL] Creator fingerprint: {creator_fingerprint}")
                     return
-                    return
             
             self.channel_keys[channel_name] = key
             self.discovered_channels.add(channel_name)
@@ -2331,6 +2362,11 @@ class BitchatClient:
         if current_channel and current_channel in self.channel_keys:
             # Encrypted channel message
             creator_fingerprint = self.channel_creators.get(current_channel, '')
+            debug_println(f"[CHANNEL] Encrypting for channel {current_channel}")
+            debug_println(f"[CHANNEL] Creator fingerprint: {creator_fingerprint}")
+            debug_println(f"[CHANNEL] My fingerprint: {self.encryption_service.get_my_fingerprint()}")
+            debug_println(f"[CHANNEL] My peer ID: {self.my_peer_id}")
+            
             encrypted_content = self.encryption_service.encrypt_for_channel(content, current_channel, self.channel_keys[current_channel], creator_fingerprint)
             payload, message_id = create_bitchat_message_payload_full(
                 self.nickname, content, current_channel, False, self.my_peer_id, True, encrypted_content
