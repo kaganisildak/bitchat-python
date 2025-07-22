@@ -1229,6 +1229,9 @@ class BitchatClient:
             # Check if we should initiate handshake (lexicographic comparison)
             if self.my_peer_id < peer_id:
                 debug_println(f"[NOISE] We should initiate handshake with {peer_id}")
+                # Check current sessions
+                debug_println(f"[NOISE] Current sessions: {list(self.encryption_service.sessions.keys())}")
+                debug_println(f"[NOISE] Session established with {peer_id}: {self.encryption_service.is_session_established(peer_id)}")
                 # Check if we already have a session or ongoing handshake
                 if not self.encryption_service.is_session_established(peer_id):
                     try:
@@ -1244,6 +1247,8 @@ class BitchatClient:
                         debug_println(f"[NOISE] Initiated handshake with {peer_id}")
                     except Exception as e:
                         debug_println(f"[NOISE] Failed to initiate handshake: {e}")
+                else:
+                    debug_println(f"[NOISE] Session already established with {peer_id}, skipping handshake")
             else:
                 debug_println(f"[NOISE] Waiting for {peer_id} to initiate handshake")
                     
@@ -1266,7 +1271,7 @@ class BitchatClient:
                 return None
             flags = data[offset]
             offset += 1
-            debug_println(f"[NOISE] Flags: 0x{flags:02x}")
+            debug_println(f"[NOISE] Flags: 0x{flags:02x} (offset now: {offset})")
             
             # Check if previousPeerID is present (flag bit 0)
             has_previous_peer_id = (flags & 0x01) != 0
@@ -1278,7 +1283,7 @@ class BitchatClient:
                 return None
             peer_id = data[offset:offset+8].hex()
             offset += 8
-            debug_println(f"[NOISE] Peer ID: {peer_id}")
+            debug_println(f"[NOISE] Peer ID: {peer_id} (offset now: {offset})")
             
             # Read publicKey using appendData format (1-byte length prefix for 255 max)
             if offset >= len(data):
@@ -1286,13 +1291,18 @@ class BitchatClient:
                 return None
             pub_key_len = data[offset]
             offset += 1
+            debug_println(f"[NOISE] Public key length: {pub_key_len} (offset now: {offset})")
             
-            if offset + pub_key_len > len(data):
-                debug_println(f"[NOISE] Error: Not enough data for publicKey, need {pub_key_len} bytes, have {len(data) - offset}")
-                return None
-            public_key = data[offset:offset+pub_key_len]
-            offset += pub_key_len
-            debug_println(f"[NOISE] Public key length: {pub_key_len}, key: {public_key.hex()}")
+            public_key = b""
+            if pub_key_len > 0:
+                if offset + pub_key_len > len(data):
+                    debug_println(f"[NOISE] Error: Not enough data for publicKey, need {pub_key_len} bytes, have {len(data) - offset}")
+                    return None
+                public_key = data[offset:offset+pub_key_len]
+                offset += pub_key_len
+                debug_println(f"[NOISE] Public key: {public_key.hex()} (offset now: {offset})")
+            else:
+                debug_println(f"[NOISE] Public key: (empty) (offset now: {offset})")
             
             # Read signingPublicKey using appendData format (1-byte length prefix for 255 max)
             if offset >= len(data):
@@ -1300,33 +1310,80 @@ class BitchatClient:
                 return None
             signing_key_len = data[offset]
             offset += 1
+            debug_println(f"[NOISE] Signing public key length: {signing_key_len} (offset now: {offset})")
             
             if offset + signing_key_len > len(data):
                 debug_println(f"[NOISE] Error: Not enough data for signingPublicKey, need {signing_key_len} bytes, have {len(data) - offset}")
                 return None
             signing_public_key = data[offset:offset+signing_key_len]
             offset += signing_key_len
-            debug_println(f"[NOISE] Signing public key length: {signing_key_len}, key: {signing_public_key.hex()}")
+            debug_println(f"[NOISE] Signing public key: {signing_public_key.hex()} (offset now: {offset})")
             
-            # Read nickname using appendString format (1-byte length prefix for 255 max)
-            if offset >= len(data):
-                debug_println("[NOISE] Error: Not enough data for nickname length")
-                return None
-            nickname_len = data[offset]
-            offset += 1
-            debug_println(f"[NOISE] Nickname length: {nickname_len}")
+            # Based on actual packet analysis, there are additional key fields in iOS implementation
+            # Read through all additional data fields until we find the nickname
+            extra_field_count = 0
+            while offset < len(data) - 10 and extra_field_count < 5:  # Safety limit
+                field_len = data[offset]
+                offset += 1
+                debug_println(f"[NOISE] Extra field {extra_field_count} length: {field_len} (offset now: {offset})")
+                
+                if field_len == 5:  # Potential nickname field
+                    if offset + field_len <= len(data):
+                        potential_nickname = data[offset:offset+field_len]
+                        try:
+                            nickname_str = potential_nickname.decode('utf-8')
+                            if nickname_str.isascii() and all(c.isprintable() for c in nickname_str):
+                                # This looks like a valid nickname
+                                nickname = nickname_str
+                                offset += field_len
+                                debug_println(f"[NOISE] Found nickname: '{nickname}' (offset now: {offset})")
+                                break
+                        except UnicodeDecodeError:
+                            pass
+                
+                # Skip this field
+                if field_len > 0:
+                    if offset + field_len > len(data):
+                        debug_println(f"[NOISE] Field {extra_field_count} extends beyond data, truncating")
+                        break
+                    if field_len <= 64:  # Only log small fields to avoid spam
+                        field_data = data[offset:offset+field_len]
+                        debug_println(f"[NOISE] Extra field {extra_field_count} data: {field_data.hex()[:32]}{'...' if len(field_data) > 16 else ''}")
+                    else:
+                        debug_println(f"[NOISE] Extra field {extra_field_count}: large field ({field_len} bytes), skipping log")
+                    
+                    # Use this field as signing key if we don't have one yet
+                    if len(signing_public_key) == 0 and field_len == 32:
+                        signing_public_key = data[offset:offset+field_len]
+                        debug_println(f"[NOISE] Using extra field {extra_field_count} as signing public key")
+                    
+                    offset += field_len
+                
+                extra_field_count += 1
             
-            nickname = ""
-            if nickname_len > 0:
-                if offset + nickname_len > len(data):
-                    debug_println(f"[NOISE] Error: Not enough data for nickname, need {nickname_len} bytes, have {len(data) - offset}")
-                    return None
-                nickname_bytes = data[offset:offset+nickname_len]
-                offset += nickname_len
-                nickname = nickname_bytes.decode('utf-8')
-                debug_println(f"[NOISE] Nickname: '{nickname}'")
-            else:
-                debug_println("[NOISE] Nickname: (empty)")
+            # If we didn't find a nickname in the loop above, try the old method
+            if not nickname:
+                debug_println(f"[NOISE] No nickname found in extra fields, trying traditional parsing at offset {offset}")
+                if offset < len(data):
+                    nickname_len = data[offset]
+                    offset += 1
+                    debug_println(f"[NOISE] Traditional nickname length: {nickname_len} (offset now: {offset})")
+                    
+                    if nickname_len > 0 and offset + nickname_len <= len(data):
+                        nickname_bytes = data[offset:offset+nickname_len]
+                        try:
+                            nickname = nickname_bytes.decode('utf-8')
+                            offset += nickname_len
+                            debug_println(f"[NOISE] Traditional nickname: '{nickname}' (offset now: {offset})")
+                        except UnicodeDecodeError:
+                            debug_println(f"[NOISE] Traditional nickname decode failed: {nickname_bytes.hex()}")
+                    else:
+                        debug_println(f"[NOISE] Traditional nickname: (empty) (offset now: {offset})")
+            
+            # If we still don't have a nickname, set it to empty
+            if not nickname:
+                nickname = ""
+                debug_println(f"[NOISE] Final nickname: (empty)")
             
             # Read timestamp using appendDate format (8-byte UInt64 in milliseconds, big-endian)
             if offset + 8 > len(data):
