@@ -14,8 +14,8 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from cryptography.hazmat.primitives.hmac import HMAC
 import hashlib
-import hmac
 
 # Noise Protocol Constants
 NOISE_PROTOCOL_NAME = "Noise_XX_25519_ChaChaPoly_SHA256"
@@ -79,40 +79,66 @@ class NoiseHandshakeState:
     
     def _mix_key(self, input_key_material: bytes):
         """Mix key material into chaining key and update cipher"""
-        # HKDF with 2 outputs
-        temp_key = hmac.new(self.chaining_key, input_key_material, hashlib.sha256).digest()
+        print(f"[NOISE] _mix_key: input={input_key_material.hex()[:32]}...")
+        print(f"[NOISE] _mix_key: chaining_key={self.chaining_key.hex()[:32]}...")
         
-        hkdf = HKDF(
-            algorithm=hashes.SHA256(),
-            length=64,  # 2 * 32 bytes
-            salt=None,
-            info=b'',
-        )
-        output = hkdf.derive(temp_key)
+        # HKDF extract step: tempKey = HMAC(chainingKey, inputKeyMaterial)
+        hmac = HMAC(self.chaining_key, hashes.SHA256())
+        hmac.update(input_key_material)
+        temp_key = hmac.finalize()
+        print(f"[NOISE] _mix_key: temp_key={temp_key.hex()[:32]}...")
         
-        self.chaining_key = output[:32]
-        self.cipher_state.initialize_key(output[32:])
+        # HKDF expand step: generate 2 outputs (matching Swift)
+        # output1 = HMAC(tempKey, "" + 0x01)
+        # output2 = HMAC(tempKey, output1 + 0x02)
+        hmac1 = HMAC(temp_key, hashes.SHA256())
+        hmac1.update(b'\x01')
+        output1 = hmac1.finalize()
+        
+        hmac2 = HMAC(temp_key, hashes.SHA256())
+        hmac2.update(output1 + b'\x02')
+        output2 = hmac2.finalize()
+        
+        print(f"[NOISE] _mix_key: new_chaining_key={output1.hex()[:32]}...")
+        print(f"[NOISE] _mix_key: cipher_key={output2.hex()[:32]}...")
+        
+        self.chaining_key = output1
+        self.cipher_state.initialize_key(output2)
     
     def _mix_hash(self, data: bytes):
-        """Mix data into hash state"""
-        self.hash_state = hashlib.sha256(self.hash_state + data).digest()
+        """Mix data into handshake hash"""
+        digest = hashes.Hash(hashes.SHA256())
+        digest.update(self.hash_state)
+        digest.update(data)
+        self.hash_state = digest.finalize()
     
     def _mix_key_and_hash(self, input_key_material: bytes):
         """Mix key material into both chaining key and hash"""
-        # HKDF with 3 outputs
-        temp_key = hmac.new(self.chaining_key, input_key_material, hashlib.sha256).digest()
+        # HKDF extract step: tempKey = HMAC(chainingKey, inputKeyMaterial)
+        hmac = HMAC(self.chaining_key, hashes.SHA256())
+        hmac.update(input_key_material)
+        temp_key = hmac.finalize()
         
-        hkdf = HKDF(
-            algorithm=hashes.SHA256(),
-            length=96,  # 3 * 32 bytes
-            salt=None,
-            info=b'',
-        )
-        output = hkdf.derive(temp_key)
+        # HKDF expand step: generate 3 outputs (matching Swift)
+        # output1 = HMAC(tempKey, "" + 0x01)
+        # output2 = HMAC(tempKey, output1 + 0x02)
+        # output3 = HMAC(tempKey, output2 + 0x03)
+        hmac1 = HMAC(temp_key, hashes.SHA256())
+        hmac1.update(b'\x01')
+        output1 = hmac1.finalize()
         
-        self.chaining_key = output[:32]
-        self._mix_hash(output[32:64])
-        self.cipher_state.initialize_key(output[64:])
+        hmac2 = HMAC(temp_key, hashes.SHA256())
+        hmac2.update(output1 + b'\x02')
+        output2 = hmac2.finalize()
+        
+        hmac3 = HMAC(temp_key, hashes.SHA256())
+        hmac3.update(output2 + b'\x03')
+        output3 = hmac3.finalize()
+        
+        self.chaining_key = output1
+        # Mix output2 into hash_state (matching Swift mixHash behavior)
+        self._mix_hash(output2)
+        self.cipher_state.initialize_key(output3)
     
     def _encrypt_and_hash(self, plaintext: bytes) -> bytes:
         """Encrypt plaintext and mix ciphertext into hash"""
@@ -126,12 +152,18 @@ class NoiseHandshakeState:
     
     def _decrypt_and_hash(self, ciphertext: bytes) -> bytes:
         """Decrypt ciphertext and mix it into hash"""
+        print(f"[NOISE] _decrypt_and_hash: ciphertext_len={len(ciphertext)}")
+        print(f"[NOISE] _decrypt_and_hash: has_cipher_key={self.cipher_state.has_key()}")
+        print(f"[NOISE] _decrypt_and_hash: hash_state={self.hash_state.hex()[:32]}...")
+        
         if self.cipher_state.has_key():
             plaintext = self.cipher_state.decrypt(ciphertext, self.hash_state)
             self._mix_hash(ciphertext)
+            print(f"[NOISE] _decrypt_and_hash: decrypted {len(ciphertext)} -> {len(plaintext)} bytes")
             return plaintext
         else:
             self._mix_hash(ciphertext)
+            print(f"[NOISE] _decrypt_and_hash: no cipher key, returning plaintext")
             return ciphertext
     
     def _dh(self, private_key: X25519PrivateKey, public_key: X25519PublicKey) -> bytes:
@@ -279,22 +311,26 @@ class NoiseHandshakeState:
         if not self.is_handshake_complete():
             raise NoiseError("Handshake not complete")
         
-        # Split function: derive two cipher states
-        temp_key = hmac.new(self.chaining_key, b'', hashlib.sha256).digest()
+        # Split function: derive two cipher states (matching Swift)
+        # tempKey = HMAC(chainingKey, "")
+        hmac = HMAC(self.chaining_key, hashes.SHA256())
+        hmac.update(b'')
+        temp_key = hmac.finalize()
         
-        hkdf = HKDF(
-            algorithm=hashes.SHA256(),
-            length=64,  # 2 * 32 bytes
-            salt=None,
-            info=b'',
-        )
-        output = hkdf.derive(temp_key)
+        # Generate 2 outputs
+        hmac1 = HMAC(temp_key, hashes.SHA256())
+        hmac1.update(b'\x01')
+        key1 = hmac1.finalize()
+        
+        hmac2 = HMAC(temp_key, hashes.SHA256())
+        hmac2.update(key1 + b'\x02')
+        key2 = hmac2.finalize()
         
         c1 = NoiseCipherState()
-        c1.initialize_key(output[:32])
+        c1.initialize_key(key1)
         
         c2 = NoiseCipherState()
-        c2.initialize_key(output[32:])
+        c2.initialize_key(key2)
         
         # Initiator uses c1 for sending, c2 for receiving
         # Responder uses c2 for sending, c1 for receiving
@@ -332,8 +368,9 @@ class NoiseCipherState:
         if not self.has_key():
             raise NoiseError("Cipher not initialized")
         
-        # Create nonce from counter (12 bytes, little-endian)
-        nonce = self.nonce.to_bytes(8, byteorder='little') + b'\x00\x00\x00\x00'
+        # Create nonce from counter (12 bytes, matching Swift)
+        # Swift puts counter at positions 4-12, zeros at 0-4
+        nonce = b'\x00\x00\x00\x00' + self.nonce.to_bytes(8, byteorder='little')
         
         cipher = ChaCha20Poly1305(self.key)
         ciphertext = cipher.encrypt(nonce, plaintext, associated_data)
@@ -346,14 +383,24 @@ class NoiseCipherState:
         if not self.has_key():
             raise NoiseError("Cipher not initialized")
         
-        # Create nonce from counter (12 bytes, little-endian)
-        nonce = self.nonce.to_bytes(8, byteorder='little') + b'\x00\x00\x00\x00'
+        print(f"[NOISE] NoiseCipher.decrypt: nonce={self.nonce}, ciphertext_len={len(ciphertext)}, ad_len={len(associated_data)}")
+        print(f"[NOISE] NoiseCipher.decrypt: ad_hex={associated_data.hex()[:32]}...")
+        
+        # Create nonce from counter (12 bytes, matching Swift)
+        # Swift puts counter at positions 4-12, zeros at 0-4
+        nonce = b'\x00\x00\x00\x00' + self.nonce.to_bytes(8, byteorder='little')
+        print(f"[NOISE] NoiseCipher.decrypt: nonce_bytes={nonce.hex()}")
         
         cipher = ChaCha20Poly1305(self.key)
-        plaintext = cipher.decrypt(nonce, ciphertext, associated_data)
-        
-        self.nonce += 1
-        return plaintext
+        try:
+            plaintext = cipher.decrypt(nonce, ciphertext, associated_data)
+            self.nonce += 1
+            print(f"[NOISE] NoiseCipher.decrypt: SUCCESS, plaintext_len={len(plaintext)}")
+            return plaintext
+        except Exception as e:
+            print(f"[NOISE] NoiseCipher.decrypt: FAILED with {type(e).__name__}: {e}")
+            print(f"[NOISE] NoiseCipher.decrypt: key={self.key.hex()[:32]}...")
+            raise
 
 @dataclass
 class NoiseSession:
@@ -460,13 +507,19 @@ class EncryptionService:
     
     def initiate_handshake(self, peer_id: str) -> bytes:
         """Initiate Noise handshake with a peer"""
-        # Clean up any existing handshake state
+        # Clean up any existing handshake state and session
         if peer_id in self.handshake_states:
+            print(f"[NOISE] Cleaning up existing handshake state for {peer_id}")
             del self.handshake_states[peer_id]
+        
+        if peer_id in self.sessions:
+            print(f"[NOISE] Removing existing session for {peer_id}")
+            del self.sessions[peer_id]
         
         # Create new handshake state as initiator
         handshake = NoiseHandshakeState(NoiseRole.INITIATOR, self.static_identity_key)
         self.handshake_states[peer_id] = handshake
+        print(f"[NOISE] Initiating handshake with {peer_id}")
         
         # Write first message (-> e)
         return handshake.write_message()
@@ -474,42 +527,39 @@ class EncryptionService:
     def process_handshake_message(self, peer_id: str, message: bytes) -> Optional[bytes]:
         """Process incoming handshake message and return response if needed"""
         
-        # Check for role collision: both sides trying to initiate
+        # Validate input
+        if not message:
+            raise NoiseError("Empty handshake message")
+        
+        if len(message) < 32:
+            raise NoiseError(f"Handshake message too short: {len(message)} bytes")
+        
+        # Check if we have an ongoing handshake
         if peer_id in self.handshake_states:
-            existing_handshake = self.handshake_states[peer_id]
-            # If we're an initiator at pattern 0 and receive a 32-byte message (ephemeral key),
-            # that means both sides tried to initiate. Use tie-breaker to resolve.
-            if (existing_handshake.role == NoiseRole.INITIATOR and 
-                existing_handshake.current_pattern == 0 and 
-                len(message) == 32):
-                
-                # Use peer ID comparison as tie-breaker (consistent with bitchat.py)
-                if self.my_peer_id and self.my_peer_id > peer_id:
-                    # We have higher ID, become responder
-                    print(f"[NOISE] Role collision detected with {peer_id[:8]}... becoming responder")
-                    del self.handshake_states[peer_id]
-                    handshake = NoiseHandshakeState(NoiseRole.RESPONDER, self.static_identity_key)
-                    self.handshake_states[peer_id] = handshake
-                else:
-                    # We have lower ID, stay as initiator - ignore their init message
-                    print(f"[NOISE] Role collision detected with {peer_id[:8]}... staying as initiator")
-                    return None
-            else:
-                handshake = existing_handshake
+            handshake = self.handshake_states[peer_id]
+            print(f"[NOISE] Continuing handshake with {peer_id}, pattern {handshake.current_pattern}, role {handshake.role}")
         else:
             # New handshake from peer - we are responder
             handshake = NoiseHandshakeState(NoiseRole.RESPONDER, self.static_identity_key)
             self.handshake_states[peer_id] = handshake
+            print(f"[NOISE] Starting new handshake with {peer_id} as responder")
+        
+        # Validate handshake state
+        if handshake.current_pattern >= len(handshake.message_patterns):
+            print(f"[NOISE] Warning: Handshake already complete with {peer_id}, ignoring message")
+            return None
         
         try:
             # Read the incoming message
             payload = handshake.read_message(message)
+            print(f"[NOISE] Successfully processed pattern {handshake.current_pattern - 1} from {peer_id}")
             
             # Check if we need to send a response
             response = None
             if not handshake.is_handshake_complete():
                 # Generate response message
                 response = handshake.write_message()
+                print(f"[NOISE] Generated response pattern {handshake.current_pattern - 1} for {peer_id}")
             
             # Check if handshake is now complete
             if handshake.is_handshake_complete():
@@ -530,6 +580,7 @@ class EncryptionService:
                     
                     # Cleanup handshake state
                     del self.handshake_states[peer_id]
+                    print(f"[NOISE] Handshake completed with {peer_id}")
                     
                     # Notify authentication
                     if self.on_peer_authenticated:
@@ -542,8 +593,12 @@ class EncryptionService:
             # Handshake failed, cleanup
             if peer_id in self.handshake_states:
                 del self.handshake_states[peer_id]
+            print(f"[NOISE] Handshake failed with {peer_id}: {type(e).__name__}: {e}")
+            print(f"[NOISE] Message length: {len(message)}, first 32 bytes: {message[:32].hex()}")
             import traceback
             print(f"[NOISE] Handshake error details: {traceback.format_exc()}")
+            print(f"[NOISE] Original exception type: {type(e).__name__}")
+            print(f"[NOISE] Original exception message: {str(e)}")
             raise NoiseError(f"Handshake failed: {e}")
     
     def handle_handshake_message(self, peer_id: str, message: bytes) -> Optional[bytes]:
@@ -597,6 +652,12 @@ class EncryptionService:
         if peer_id in self.sessions:
             del self.sessions[peer_id]
         if peer_id in self.handshake_states:
+            del self.handshake_states[peer_id]
+    
+    def clear_handshake_state(self, peer_id: str):
+        """Clear handshake state for a peer (used when handshake fails)"""
+        if peer_id in self.handshake_states:
+            print(f"[NOISE] Clearing failed handshake state for {peer_id}")
             del self.handshake_states[peer_id]
     
     def cleanup_old_sessions(self, max_age: float = 3600):
@@ -657,3 +718,28 @@ class EncryptionService:
             iterations=100000,
         )
         return kdf.derive(password.encode('utf-8'))
+    
+    def debug_handshake_state(self, peer_id: str = None):
+        """Debug handshake and session state"""
+        print(f"[NOISE DEBUG] ===== Encryption Service State =====")
+        print(f"[NOISE DEBUG] Total handshake states: {len(self.handshake_states)}")
+        print(f"[NOISE DEBUG] Total sessions: {len(self.sessions)}")
+        
+        if peer_id:
+            if peer_id in self.handshake_states:
+                hs = self.handshake_states[peer_id]
+                print(f"[NOISE DEBUG] {peer_id} handshake: pattern {hs.current_pattern}, role {hs.role}")
+            else:
+                print(f"[NOISE DEBUG] {peer_id}: no handshake state")
+                
+            if peer_id in self.sessions:
+                print(f"[NOISE DEBUG] {peer_id}: has established session")
+            else:
+                print(f"[NOISE DEBUG] {peer_id}: no session")
+        else:
+            for pid, hs in self.handshake_states.items():
+                print(f"[NOISE DEBUG] {pid}: pattern {hs.current_pattern}, role {hs.role}")
+                
+            for pid in self.sessions.keys():
+                print(f"[NOISE DEBUG] {pid}: established session")
+        print(f"[NOISE DEBUG] =====================================")
