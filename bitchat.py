@@ -534,7 +534,8 @@ class BitchatClient:
             for channel, encrypted_password in self.app_state.encrypted_channel_passwords.items():
                 try:
                     password = decrypt_password(encrypted_password, self.app_state.identity_key)
-                    key = EncryptionService.derive_channel_key(password, channel)
+                    creator_fingerprint = self.channel_creators.get(channel)
+                    key = EncryptionService.derive_channel_key(password, channel, creator_fingerprint)
                     self.channel_keys[channel] = key
                     debug_println(f"[CHANNEL] Restored key for password-protected channel: {channel}")
                 except Exception as e:
@@ -1652,7 +1653,9 @@ class BitchatClient:
     
     async def send_channel_announce(self, channel: str, is_protected: bool, key_commitment: Optional[str]):
         """Send channel announcement"""
-        payload = f"{channel}|{'1' if is_protected else '0'}|{self.my_peer_id}|{key_commitment or ''}"
+        # Use fingerprint instead of peer ID for channel creator (matching Swift behavior)
+        creator_fingerprint = self.encryption_service.get_my_fingerprint()
+        payload = f"{channel}|{'1' if is_protected else '0'}|{creator_fingerprint}|{key_commitment or ''}"
         packet = create_bitchat_packet(
             self.my_peer_id,
             MessageType.CHANNEL_ANNOUNCE,
@@ -1950,13 +1953,18 @@ class BitchatClient:
                 print("\033[90mMinimum 4 characters required.\033[0m")
                 return
             
-            key = EncryptionService.derive_channel_key(password, channel_name)
+            creator_fingerprint = self.channel_creators.get(channel_name)
+            key = EncryptionService.derive_channel_key(password, channel_name, creator_fingerprint)
             
             # Verify password
             if channel_name in self.channel_key_commitments:
                 test_commitment = hashlib.sha256(key).hexdigest()
                 if test_commitment != self.channel_key_commitments[channel_name]:
                     print(f"❌ wrong password for channel {channel_name}. please enter the correct password.")
+                    debug_println(f"[CHANNEL] Key commitment mismatch. Expected: {self.channel_key_commitments[channel_name]}")
+                    debug_println(f"[CHANNEL] Actual: {test_commitment}")
+                    debug_println(f"[CHANNEL] Creator fingerprint: {creator_fingerprint}")
+                    return
                     return
             
             self.channel_keys[channel_name] = key
@@ -1984,16 +1992,29 @@ class BitchatClient:
         else:
             # Not password protected
             if password:
-                key = EncryptionService.derive_channel_key(password, channel_name)
+                # Create a new password-protected channel
+                creator_fingerprint = self.encryption_service.get_my_fingerprint()
+                self.channel_creators[channel_name] = creator_fingerprint
+                key = EncryptionService.derive_channel_key(password, channel_name, creator_fingerprint)
                 self.channel_keys[channel_name] = key
+                self.password_protected_channels.add(channel_name)
                 self.discovered_channels.add(channel_name)
                 self.chat_context.switch_to_channel_silent(channel_name)
                 print("\r\033[K\033[90m─────────────────────────\033[0m")
-                print(f"\033[90m» Joined password-protected channel: {channel_name} 🔒. Just type to send messages.\033[0m")
+                print(f"\033[90m» Created password-protected channel: {channel_name} 🔒. Just type to send messages.\033[0m")
                 
-                if channel_name in self.channel_creators:
-                    key_commitment = hashlib.sha256(key).hexdigest()
-                    await self.send_channel_announce(channel_name, True, key_commitment)
+                # Store encrypted password
+                if self.app_state.identity_key:
+                    try:
+                        encrypted = encrypt_password(password, self.app_state.identity_key)
+                        self.app_state.encrypted_channel_passwords[channel_name] = encrypted
+                        await self.save_app_state()
+                    except Exception as e:
+                        debug_println(f"[CHANNEL] Failed to encrypt password: {e}")
+                
+                key_commitment = hashlib.sha256(key).hexdigest()
+                self.channel_key_commitments[channel_name] = key_commitment
+                await self.send_channel_announce(channel_name, True, key_commitment)
                 
                 print("> ", end='', flush=True)
             else:
@@ -2189,12 +2210,14 @@ class BitchatClient:
         
         # Claim ownership if no owner
         if not owner:
-            self.channel_creators[channel] = self.my_peer_id
+            creator_fingerprint = self.encryption_service.get_my_fingerprint()
+            self.channel_creators[channel] = creator_fingerprint
             debug_println(f"[CHANNEL] Claiming ownership of {channel}")
         
         # Update password
         old_key = self.channel_keys.get(channel)
-        new_key = EncryptionService.derive_channel_key(new_password, channel)
+        creator_fingerprint = self.channel_creators.get(channel)
+        new_key = EncryptionService.derive_channel_key(new_password, channel, creator_fingerprint)
         
         self.channel_keys[channel] = new_key
         self.password_protected_channels.add(channel)

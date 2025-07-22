@@ -491,6 +491,10 @@ class EncryptionService:
         )
         return hashlib.sha256(key_bytes).hexdigest()
     
+    def get_my_fingerprint(self) -> str:
+        """Convenience method to get our own fingerprint"""
+        return self.get_identity_fingerprint()
+    
     def get_public_key_bytes(self) -> bytes:
         """Get our public key bytes for sharing"""
         public_key = self.static_identity_key.public_key()
@@ -715,15 +719,21 @@ class EncryptionService:
         return nonce + cipher.encrypt(nonce, data, None)
     
     @staticmethod
-    def derive_channel_key(password: str, channel: str) -> bytes:
+    def derive_channel_key(password: str, channel: str, creator_fingerprint: str = None) -> bytes:
         """Derive a channel key from password and channel name"""
         from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-        salt = channel.encode('utf-8')
+        
+        # Use the same salt format as Swift: "bitchat-channel-{channel}[-{fingerprint}]"
+        salt_components = f"bitchat-channel-{channel}"
+        if creator_fingerprint:
+            salt_components += f"-{creator_fingerprint}"
+        
+        salt = salt_components.encode('utf-8')
         kdf = PBKDF2HMAC(
             algorithm=hashes.SHA256(),
             length=32,
             salt=salt,
-            iterations=100000,
+            iterations=210000,  # Match Swift's 210,000 iterations
         )
         return kdf.derive(password.encode('utf-8'))
     
