@@ -394,29 +394,32 @@ class BitchatClient:
         if self.client and self.characteristic:
             # Send Noise identity announcement first
             try:
-                # Create a proper timestamp that matches iOS Date encoding
-                timestamp_seconds = time.time()
+                # Create a proper timestamp that matches iOS (milliseconds since epoch)
+                timestamp_ms = int(time.time() * 1000)
                 public_key_bytes = self.encryption_service.get_public_key()
+                signing_public_key_bytes = self.encryption_service.get_signing_public_key_bytes()
                 
                 # Create binding data for signature (matching iOS)
-                binding_data = self.my_peer_id.encode('utf-8') + public_key_bytes + struct.pack('>d', timestamp_seconds)
+                # iOS uses: peerID + publicKey + timestamp (as string)
+                timestamp_data = str(timestamp_ms).encode('utf-8')
+                binding_data = self.my_peer_id.encode('utf-8') + public_key_bytes + timestamp_data
                 signature = self.encryption_service.sign_data(binding_data)
                 
-                identity_data = {
-                    "peerID": self.my_peer_id,
-                    "publicKey": base64.b64encode(public_key_bytes).decode(),
-                    "nickname": self.nickname,
-                    "timestamp": timestamp_seconds,  # iOS Date() encodes as timestamp in seconds
-                    "signature": base64.b64encode(signature).decode(),
-                    "previousPeerID": None
-                }
+                # Encode to binary format
+                identity_payload = self.encode_noise_identity_announcement_binary(
+                    self.my_peer_id, public_key_bytes, signing_public_key_bytes,
+                    self.nickname, timestamp_ms, signature
+                )
+                
                 identity_packet = create_bitchat_packet_with_signature(
-                    self.my_peer_id, MessageType.NOISE_IDENTITY_ANNOUNCE, json.dumps(identity_data).encode(), signature
+                    self.my_peer_id, MessageType.NOISE_IDENTITY_ANNOUNCE, identity_payload, signature
                 )
                 await self.send_packet(identity_packet)
-                debug_println("[3] Sent Noise identity announcement")
+                debug_println("[3] Sent Noise identity announcement (binary format)")
             except Exception as e:
                 debug_println(f"[3] Failed to send identity announcement: {e}")
+                import traceback
+                debug_println(f"[3] Traceback: {traceback.format_exc()}")
                 # Fallback to old key exchange
                 handshake_message = self.encryption_service.initiate_handshake(self.my_peer_id)
                 handshake_packet = create_bitchat_packet(
@@ -675,24 +678,24 @@ class BitchatClient:
                 # We have higher ID, send targeted identity announce to prompt them to initiate
                 debug_println(f"[CRYPTO] Sending targeted identity announce to {packet.sender_id_str} (tie-breaker: they have lower ID)")
                 try:
-                    timestamp_seconds = time.time()
+                    timestamp_ms = int(time.time() * 1000)
                     public_key_bytes = self.encryption_service.get_public_key()
+                    signing_public_key_bytes = self.encryption_service.get_signing_public_key_bytes()
                     
                     # Create binding data for signature
-                    binding_data = self.my_peer_id.encode('utf-8') + public_key_bytes + struct.pack('>d', timestamp_seconds)
+                    timestamp_data = str(timestamp_ms).encode('utf-8')
+                    binding_data = self.my_peer_id.encode('utf-8') + public_key_bytes + timestamp_data
                     signature = self.encryption_service.sign_data(binding_data)
                     
-                    identity_data = {
-                        "peerID": self.my_peer_id,
-                        "publicKey": base64.b64encode(public_key_bytes).decode(),
-                        "nickname": self.nickname,
-                        "timestamp": timestamp_seconds,
-                        "signature": base64.b64encode(signature).decode(),
-                        "previousPeerID": None
-                    }
+                    # Encode to binary format
+                    identity_payload = self.encode_noise_identity_announcement_binary(
+                        self.my_peer_id, public_key_bytes, signing_public_key_bytes,
+                        self.nickname, timestamp_ms, signature
+                    )
+                    
                     identity_packet = create_bitchat_packet_with_recipient(
                         self.my_peer_id, packet.sender_id_str, MessageType.NOISE_IDENTITY_ANNOUNCE, 
-                        json.dumps(identity_data).encode(), signature
+                        identity_payload, signature
                     )
                     await self.send_packet(identity_packet)
                 except Exception as e:
@@ -1174,56 +1177,254 @@ class BitchatClient:
             sender_id = packet.sender_id_str
             debug_println(f"[NOISE] Received identity announcement from {sender_id}")
             
+            # Skip if it's from ourselves
+            if sender_id == self.my_peer_id:
+                return
+                
             # Try to decode the identity announcement
+            announcement = None
+            
+            # First try binary format, then JSON fallback
             try:
-                announcement_data = json.loads(packet.payload.decode('utf-8'))
-                peer_id = announcement_data.get('peerID', sender_id)
-                nickname = announcement_data.get('nickname', 'Unknown')
+                announcement = self.parse_noise_identity_announcement_binary(packet.payload)
+            except Exception as be:
+                debug_println(f"[NOISE] Binary decode failed: {be}")
+                # Try JSON fallback for compatibility
+                try:
+                    announcement_data = json.loads(packet.payload.decode('utf-8'))
+                    announcement = {
+                        'peerID': announcement_data.get('peerID', sender_id),
+                        'nickname': announcement_data.get('nickname', 'Unknown'),
+                        'publicKey': announcement_data.get('publicKey', ''),
+                        'signingPublicKey': announcement_data.get('signingPublicKey', ''),
+                        'timestamp': announcement_data.get('timestamp', 0),
+                        'signature': announcement_data.get('signature', '')
+                    }
+                except Exception as je:
+                    debug_println(f"[NOISE] JSON decode also failed: {je}")
+                    debug_println(f"[NOISE] Raw payload (first 32 bytes): {packet.payload[:32].hex()}")
+                    return
+            
+            if not announcement:
+                debug_println(f"[NOISE] Failed to decode identity announcement from {sender_id}")
+                return
                 
-                debug_println(f"[NOISE] Identity announcement: {peer_id} -> {nickname}")
-                
-                # Check if this is a new peer
-                is_new_peer = peer_id not in self.peers
-                
-                # Update peer info
-                if peer_id not in self.peers:
-                    self.peers[peer_id] = Peer()
-                self.peers[peer_id].nickname = nickname
-                
-                if is_new_peer:
-                    print(f"\r\033[K\033[33m{nickname} connected\033[0m\n> ", end='', flush=True)
-                    debug_println(f"[<-- RECV] Noise Identity Announce: Peer {peer_id} is now known as '{nickname}'")
-                
-                # Check if we should initiate handshake (lexicographic comparison - matching dummy implementation)
-                if self.my_peer_id < peer_id:
-                    debug_println(f"[NOISE] We should initiate handshake with {peer_id}")
-                    # Check if we already have a session or ongoing handshake
-                    if not self.encryption_service.is_session_established(peer_id):
-                        try:
-                            handshake_message = self.encryption_service.initiate_handshake(peer_id)
-                            handshake_packet = create_bitchat_packet_with_recipient(
-                                self.my_peer_id, peer_id, MessageType.NOISE_HANDSHAKE_INIT, handshake_message, None
-                            )
-                            # Set TTL to 3 like iOS
-                            handshake_data = bytearray(handshake_packet)
-                            handshake_data[2] = 3
-                            handshake_packet = bytes(handshake_data)
-                            await self.send_packet(handshake_packet)
-                            debug_println(f"[NOISE] Initiated handshake with {peer_id}")
-                        except Exception as e:
-                            debug_println(f"[NOISE] Failed to initiate handshake: {e}")
-                else:
-                    debug_println(f"[NOISE] Waiting for {peer_id} to initiate handshake")
-                    # Send our own identity announcement if we haven't recently
-                    # This helps ensure both sides see each other
+            peer_id = announcement['peerID']
+            nickname = announcement['nickname']
+            
+            debug_println(f"[NOISE] Identity announcement: {peer_id} -> {nickname}")
+            
+            # Check if this is a new peer
+            is_new_peer = peer_id not in self.peers
+            
+            # Update peer info
+            if peer_id not in self.peers:
+                self.peers[peer_id] = Peer()
+            self.peers[peer_id].nickname = nickname
+            
+            if is_new_peer:
+                print(f"\r\033[K\033[33m{nickname} connected\033[0m\n> ", end='', flush=True)
+                debug_println(f"[<-- RECV] Announce: Peer {peer_id} is now known as '{nickname}'")
+            
+            # Check if we should initiate handshake (lexicographic comparison)
+            if self.my_peer_id < peer_id:
+                debug_println(f"[NOISE] We should initiate handshake with {peer_id}")
+                # Check if we already have a session or ongoing handshake
+                if not self.encryption_service.is_session_established(peer_id):
+                    try:
+                        handshake_message = self.encryption_service.initiate_handshake(peer_id)
+                        handshake_packet = create_bitchat_packet_with_recipient(
+                            self.my_peer_id, peer_id, MessageType.NOISE_HANDSHAKE_INIT, handshake_message, None
+                        )
+                        # Set TTL to 3 like iOS
+                        handshake_data = bytearray(handshake_packet)
+                        handshake_data[2] = 3
+                        handshake_packet = bytes(handshake_data)
+                        await self.send_packet(handshake_packet)
+                        debug_println(f"[NOISE] Initiated handshake with {peer_id}")
+                    except Exception as e:
+                        debug_println(f"[NOISE] Failed to initiate handshake: {e}")
+            else:
+                debug_println(f"[NOISE] Waiting for {peer_id} to initiate handshake")
                     
-            except json.JSONDecodeError:
-                debug_println(f"[NOISE] Could not decode identity announcement from {sender_id}")
-                
         except Exception as e:
             debug_println(f"[NOISE] Error handling identity announcement: {e}")
             import traceback
             debug_println(f"[NOISE] Identity announce error details: {traceback.format_exc()}")
+    
+    def parse_noise_identity_announcement_binary(self, data: bytes) -> dict:
+        """Parse binary format noise identity announcement matching iOS appendData format"""
+        try:
+            offset = 0
+            
+            debug_println(f"[NOISE] Parsing binary announcement, total length: {len(data)}")
+            debug_println(f"[NOISE] Raw data (hex): {data.hex()}")
+            
+            # Read flags byte
+            if offset >= len(data):
+                debug_println("[NOISE] Error: Not enough data for flags")
+                return None
+            flags = data[offset]
+            offset += 1
+            debug_println(f"[NOISE] Flags: 0x{flags:02x}")
+            
+            # Check if previousPeerID is present (flag bit 0)
+            has_previous_peer_id = (flags & 0x01) != 0
+            debug_println(f"[NOISE] Has previous peer ID: {has_previous_peer_id}")
+            
+            # Read peerID (8 bytes)
+            if offset + 8 > len(data):
+                debug_println(f"[NOISE] Error: Not enough data for peerID, need 8 bytes, have {len(data) - offset}")
+                return None
+            peer_id = data[offset:offset+8].hex()
+            offset += 8
+            debug_println(f"[NOISE] Peer ID: {peer_id}")
+            
+            # Read publicKey using appendData format (1-byte length prefix for 255 max)
+            if offset >= len(data):
+                debug_println("[NOISE] Error: Not enough data for publicKey length")
+                return None
+            pub_key_len = data[offset]
+            offset += 1
+            
+            if offset + pub_key_len > len(data):
+                debug_println(f"[NOISE] Error: Not enough data for publicKey, need {pub_key_len} bytes, have {len(data) - offset}")
+                return None
+            public_key = data[offset:offset+pub_key_len]
+            offset += pub_key_len
+            debug_println(f"[NOISE] Public key length: {pub_key_len}, key: {public_key.hex()}")
+            
+            # Read signingPublicKey using appendData format (1-byte length prefix for 255 max)
+            if offset >= len(data):
+                debug_println("[NOISE] Error: Not enough data for signingPublicKey length")
+                return None
+            signing_key_len = data[offset]
+            offset += 1
+            
+            if offset + signing_key_len > len(data):
+                debug_println(f"[NOISE] Error: Not enough data for signingPublicKey, need {signing_key_len} bytes, have {len(data) - offset}")
+                return None
+            signing_public_key = data[offset:offset+signing_key_len]
+            offset += signing_key_len
+            debug_println(f"[NOISE] Signing public key length: {signing_key_len}, key: {signing_public_key.hex()}")
+            
+            # Read nickname using appendString format (1-byte length prefix for 255 max)
+            if offset >= len(data):
+                debug_println("[NOISE] Error: Not enough data for nickname length")
+                return None
+            nickname_len = data[offset]
+            offset += 1
+            debug_println(f"[NOISE] Nickname length: {nickname_len}")
+            
+            nickname = ""
+            if nickname_len > 0:
+                if offset + nickname_len > len(data):
+                    debug_println(f"[NOISE] Error: Not enough data for nickname, need {nickname_len} bytes, have {len(data) - offset}")
+                    return None
+                nickname_bytes = data[offset:offset+nickname_len]
+                offset += nickname_len
+                nickname = nickname_bytes.decode('utf-8')
+                debug_println(f"[NOISE] Nickname: '{nickname}'")
+            else:
+                debug_println("[NOISE] Nickname: (empty)")
+            
+            # Read timestamp using appendDate format (8-byte UInt64 in milliseconds, big-endian)
+            if offset + 8 > len(data):
+                debug_println(f"[NOISE] Error: Not enough data for timestamp, need 8 bytes, have {len(data) - offset}")
+                return None
+            timestamp_ms = int.from_bytes(data[offset:offset+8], byteorder='big')
+            offset += 8
+            timestamp = timestamp_ms / 1000.0  # Convert from milliseconds to seconds
+            debug_println(f"[NOISE] Timestamp: {timestamp} ({timestamp_ms}ms)")
+            
+            # Read previousPeerID if present (8 bytes)
+            previous_peer_id = None
+            if has_previous_peer_id:
+                if offset + 8 > len(data):
+                    debug_println("[NOISE] Error: Not enough data for previousPeerID")
+                    return None
+                previous_peer_id = data[offset:offset+8].hex()
+                offset += 8
+                debug_println(f"[NOISE] Previous peer ID: {previous_peer_id}")
+            
+            # Read signature using appendData format (1-byte length prefix for 255 max)
+            if offset >= len(data):
+                debug_println("[NOISE] Error: Not enough data for signature length")
+                return None
+            signature_len = data[offset]
+            offset += 1
+            
+            if offset + signature_len > len(data):
+                debug_println(f"[NOISE] Error: Not enough data for signature, need {signature_len} bytes, have {len(data) - offset}")
+                return None
+            signature = data[offset:offset+signature_len]
+            offset += signature_len
+            debug_println(f"[NOISE] Signature length: {signature_len}, sig: {signature.hex()}")
+            
+            debug_println(f"[NOISE] Total parsed {offset} bytes out of {len(data)} available")
+            
+            return {
+                'peerID': peer_id,
+                'publicKey': public_key.hex(),
+                'signingPublicKey': signing_public_key.hex(),
+                'nickname': nickname,
+                'timestamp': timestamp,
+                'signature': signature.hex(),
+                'previousPeerID': previous_peer_id,
+                'truncated': False
+            }
+            
+        except Exception as e:
+            debug_println(f"[NOISE] Error parsing binary announcement: {e}")
+            import traceback
+            debug_println(f"[NOISE] Binary parser error details: {traceback.format_exc()}")
+            return None
+    
+    def encode_noise_identity_announcement_binary(self, peer_id: str, public_key: bytes, 
+                                                  signing_public_key: bytes, nickname: str, 
+                                                  timestamp: int, signature: bytes, 
+                                                  previous_peer_id: str = None) -> bytes:
+        """Encode noise identity announcement to binary format matching iOS appendData format"""
+        data = bytearray()
+        
+        # Flags byte: bit 0 = hasPreviousPeerID
+        flags = 0
+        if previous_peer_id:
+            flags |= 0x01
+        data.append(flags)
+        
+        # PeerID as 8-byte hex string (match Swift conversion)
+        peer_data = bytes.fromhex(peer_id.ljust(16, '0')[:16])  # Pad to 8 bytes
+        data.extend(peer_data)
+        
+        # PublicKey using appendData format (1-byte length prefix since 32 < 255)
+        data.append(len(public_key))
+        data.extend(public_key)
+        
+        # SigningPublicKey using appendData format (1-byte length prefix since 32 < 255)
+        data.append(len(signing_public_key))
+        data.extend(signing_public_key)
+        
+        # Nickname using appendString format (1-byte length prefix for strings under 255 chars)
+        nickname_bytes = nickname.encode('utf-8')
+        data.append(len(nickname_bytes))
+        data.extend(nickname_bytes)
+        
+        # Timestamp using appendDate format (8 bytes UInt64 milliseconds, big-endian)
+        timestamp_ms = int(timestamp * 1000)  # Convert to milliseconds
+        for i in range(8):
+            data.append((timestamp_ms >> ((7-i) * 8)) & 0xFF)
+        
+        # PreviousPeerID if present (8 bytes, after timestamp)
+        if previous_peer_id:
+            prev_data = bytes.fromhex(previous_peer_id.ljust(16, '0')[:16])  # Pad to 8 bytes
+            data.extend(prev_data)
+        
+        # Signature using appendData format (1-byte length prefix)
+        data.append(len(signature))
+        data.extend(signature)
+        
+        return bytes(data)
     
     async def send_delivery_ack(self, message_id: str, sender_id: str, is_private: bool):
         """Send delivery acknowledgment"""
@@ -2166,23 +2367,23 @@ class BitchatClient:
                             
                             # Send Noise identity announcement
                             try:
-                                timestamp_seconds = time.time()
+                                timestamp_ms = int(time.time() * 1000)
                                 public_key_bytes = self.encryption_service.get_public_key()
+                                signing_public_key_bytes = self.encryption_service.get_signing_public_key_bytes()
                                 
                                 # Create binding data for signature
-                                binding_data = self.my_peer_id.encode('utf-8') + public_key_bytes + struct.pack('>d', timestamp_seconds)
+                                timestamp_data = str(timestamp_ms).encode('utf-8')
+                                binding_data = self.my_peer_id.encode('utf-8') + public_key_bytes + timestamp_data
                                 signature = self.encryption_service.sign_data(binding_data)
                                 
-                                identity_data = {
-                                    "peerID": self.my_peer_id,
-                                    "publicKey": base64.b64encode(public_key_bytes).decode(),
-                                    "nickname": self.nickname,
-                                    "timestamp": timestamp_seconds,
-                                    "signature": base64.b64encode(signature).decode(),
-                                    "previousPeerID": None
-                                }
+                                # Encode to binary format
+                                identity_payload = self.encode_noise_identity_announcement_binary(
+                                    self.my_peer_id, public_key_bytes, signing_public_key_bytes,
+                                    self.nickname, timestamp_ms, signature
+                                )
+                                
                                 identity_packet = create_bitchat_packet_with_signature(
-                                    self.my_peer_id, MessageType.NOISE_IDENTITY_ANNOUNCE, json.dumps(identity_data).encode(), signature
+                                    self.my_peer_id, MessageType.NOISE_IDENTITY_ANNOUNCE, identity_payload, signature
                                 )
                                 await self.send_packet(identity_packet)
                             except Exception as e:

@@ -507,6 +507,12 @@ class EncryptionService:
         """Get combined public key data for legacy compatibility"""
         return self.get_public_key_bytes()
     
+    def get_signing_public_key_bytes(self) -> bytes:
+        """Get signing public key bytes (for now, same as static key)"""
+        # For compatibility with Swift, we'll use the same key for signing
+        # In a full implementation, this would be a separate Ed25519 key
+        return self.get_public_key_bytes()
+    
     def initiate_handshake(self, peer_id: str) -> bytes:
         """Initiate Noise handshake with a peer"""
         # Clean up any existing handshake state and session
