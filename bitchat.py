@@ -245,20 +245,28 @@ class BitchatClient:
     async def send_pending_private_messages(self, peer_id: str):
         """Send all pending private messages for a peer after handshake completes"""
         if peer_id not in self.pending_private_messages:
+            debug_println(f"[NOISE] No pending messages for {peer_id}")
             return
         
         pending_messages = self.pending_private_messages.pop(peer_id, [])
         if not pending_messages:
+            debug_println(f"[NOISE] No pending messages found for {peer_id}")
             return
         
         debug_println(f"[NOISE] Sending {len(pending_messages)} pending messages to {peer_id}")
         
-        for content, nickname, message_id in pending_messages:
+        for i, (content, nickname, message_id) in enumerate(pending_messages):
             try:
+                debug_println(f"[NOISE] Sending pending message {i+1}/{len(pending_messages)}: '{content}' to {peer_id}")
+                
                 # Add longer delay before sending to allow BLE queue to clear
                 await asyncio.sleep(0.3)
-                # Call the actual send function with established session
-                await self.send_private_message(content, peer_id, nickname, message_id)
+                
+                # Send the message directly without going through session check again
+                await self._send_private_message_direct(content, peer_id, nickname, message_id)
+                
+                debug_println(f"[NOISE] Successfully sent pending message {i+1}/{len(pending_messages)} to {peer_id}")
+                
                 # Small delay between messages
                 await asyncio.sleep(0.2)
             except Exception as e:
@@ -271,6 +279,76 @@ class BitchatClient:
                     self.pending_private_messages[peer_id].append((content, nickname, message_id))
                     # Don't retry immediately, let it retry later
                     break
+    
+    async def _send_private_message_direct(self, content: str, target_peer_id: str, target_nickname: str, message_id: Optional[str] = None):
+        """Send a private message directly, assuming session is already established"""
+        if not self.client or not self.characteristic:
+            raise Exception("Not connected")
+            
+        if not self.encryption_service.is_session_established(target_peer_id):
+            raise Exception(f"No session established with {target_peer_id}")
+        
+        debug_println(f"[PRIVATE] Sending encrypted message to {target_nickname}")
+        
+        # Create message payload - don't set is_encrypted=True since encryption happens at Noise layer
+        payload, msg_id = create_bitchat_message_payload_full(
+            self.nickname, content, None, True, self.my_peer_id, False, None
+        )
+        
+        if message_id:
+            msg_id = message_id  # Use provided message ID if available
+        
+        debug_println(f"[PRIVATE] Created message payload: {len(payload)} bytes")
+        
+        # Track for delivery
+        self.delivery_tracker.track_message(msg_id, content, True)
+        
+        # Create INNER packet (BitchatPacket with MESSAGE type) that will be encrypted
+        inner_packet = create_bitchat_packet_with_recipient(
+            self.my_peer_id,
+            target_peer_id,
+            MessageType.MESSAGE,
+            payload,
+            None
+        )
+        
+        # Set TTL for inner packet
+        inner_packet_data = bytearray(inner_packet)
+        inner_packet_data[2] = 7  # TTL for inner packet
+        inner_packet = bytes(inner_packet_data)
+        
+        debug_println(f"[PRIVATE] Created inner packet: {len(inner_packet)} bytes")
+        
+        # Encrypt the ENTIRE inner packet using Noise
+        encrypted = self.encryption_service.encrypt_for_peer(target_peer_id, inner_packet)
+        debug_println(f"[PRIVATE] Encrypted inner packet: {len(encrypted)} bytes")
+        
+        # Create outer Noise encrypted packet
+        packet = create_bitchat_packet_with_recipient(
+            self.my_peer_id,
+            target_peer_id,
+            MessageType.NOISE_ENCRYPTED,
+            encrypted,
+            None
+        )
+        
+        # Send the packet
+        await self.send_packet(packet)
+        
+        # Display sent message
+        timestamp = datetime.now()
+        display = format_message_display(
+            timestamp,
+            self.nickname,
+            content,
+            True,
+            False,
+            None,
+            target_nickname,
+            self.nickname
+        )
+        print(f"\x1b[1A\r\033[K{display}")
+        debug_println(f"[PRIVATE] Successfully sent message to {target_peer_id}")
         
     async def find_device(self) -> Optional[BLEDevice]:
         """Scan for BitChat service"""
@@ -1030,6 +1108,9 @@ class BitchatClient:
                 else:
                     # Handle non-BitchatPacket data (likely JSON acknowledgments or receipts)
                     debug_println(f"[NOISE] Decrypted data does not start with version 1, likely acknowledgment/receipt")
+                    debug_println(f"[NOISE] Decrypted data hex: {decrypted_payload.hex()}")
+                    debug_println(f"[NOISE] First 10 bytes: {decrypted_payload[:10]}")
+                    
                     try:
                         # Try to parse as JSON (iOS read receipts/acks start with newline + JSON)
                         data_str = decrypted_payload.decode('utf-8').strip()
@@ -1039,9 +1120,42 @@ class BitchatClient:
                             debug_println(f"[NOISE] Received acknowledgment: {ack_data}")
                             # Handle acknowledgment data if needed
                         else:
-                            debug_println(f"[NOISE] Unknown decrypted data format")
+                            debug_println(f"[NOISE] Unknown decrypted data format: {data_str[:100]}...")
                     except Exception as json_e:
                         debug_println(f"[NOISE] Failed to parse as JSON acknowledgment: {json_e}")
+                        # Try to check if this might be a different packet format
+                        if len(decrypted_payload) > 0:
+                            first_byte = decrypted_payload[0]
+                            debug_println(f"[NOISE] First byte is 0x{first_byte:02x} (expected 0x01 for BitchatPacket)")
+                            
+                            # Check if this might be raw message data
+                            if first_byte < 0x20:  # Control characters
+                                debug_println(f"[NOISE] Data starts with control character, might be binary protocol")
+                            else:
+                                try:
+                                    # Try to decode as text to see if it's readable
+                                    text_attempt = decrypted_payload.decode('utf-8', errors='replace')
+                                    debug_println(f"[NOISE] Decoded as text (with replacements): {text_attempt[:100]}...")
+                                except:
+                                    debug_println(f"[NOISE] Cannot decode as text")
+                        
+                        # Check if this could be a padded message that needs unpadding
+                        try:
+                            from compression import unpad_message
+                            unpadded = unpad_message(decrypted_payload)
+                            debug_println(f"[NOISE] Trying unpadded data: {len(unpadded)} bytes")
+                            if len(unpadded) > 0 and unpadded[0] == 1:
+                                debug_println(f"[NOISE] Unpadded data starts with version 1, trying to parse as BitchatPacket")
+                                try:
+                                    unpadded_packet = parse_bitchat_packet(unpadded)
+                                    if unpadded_packet:
+                                        debug_println(f"[NOISE] Successfully parsed unpadded packet: type={unpadded_packet.msg_type}")
+                                        await self.handle_packet(unpadded_packet, unpadded)
+                                        return
+                                except Exception as unpad_parse_e:
+                                    debug_println(f"[NOISE] Failed to parse unpadded packet: {unpad_parse_e}")
+                        except Exception as unpad_e:
+                            debug_println(f"[NOISE] Unpadding failed: {unpad_e}")
                         
             except Exception as e:
                 debug_println(f"[NOISE] Error parsing decrypted inner packet: {e}")
@@ -1050,7 +1164,12 @@ class BitchatClient:
                 debug_println(f"[NOISE] Decrypted data preview: {preview.hex() if isinstance(preview, bytes) else preview}")
                 
         except Exception as e:
+            import traceback
             debug_println(f"[NOISE] Failed to decrypt message from {packet.sender_id_str}: {e}")
+            debug_println(f"[NOISE] Decryption error details: {traceback.format_exc()}")
+            debug_println(f"[NOISE] Encrypted payload size: {len(payload_bytes)} bytes")
+            debug_println(f"[NOISE] Encrypted payload hex (first 50 bytes): {payload_bytes[:50].hex()}")
+            
             # Check if we have a session with this peer
             if not self.encryption_service.is_session_established(packet.sender_id_str):
                 debug_println(f"[NOISE] No session established with {packet.sender_id_str}")
@@ -2276,112 +2395,8 @@ class BitchatClient:
             print(f"\033[90m» Your message will be sent automatically once the handshake completes.\033[0m")
             return
             
-        debug_println(f"[PRIVATE] Sending encrypted message to {target_nickname}")
-        
-        # Create message payload - don't set is_encrypted=True since encryption happens at Noise layer
-        payload, message_id = create_bitchat_message_payload_full(
-            self.nickname, content, None, True, self.my_peer_id, False, None
-        )
-        
-        debug_println(f"[PRIVATE] Created message payload: {len(payload)} bytes")
-        debug_println(f"[PRIVATE] Message payload hex: {payload.hex()}")
-        
-        # Track for delivery
-        self.delivery_tracker.track_message(message_id, content, True)
-        
-        # Create INNER packet (BitchatPacket with MESSAGE type) that will be encrypted
-        # This matches Swift implementation: BitchatPacket(type: MessageType.message, ...)
-        inner_packet = create_bitchat_packet_with_recipient(
-            self.my_peer_id,
-            target_peer_id,
-            MessageType.MESSAGE,
-            payload,
-            None
-        )
-        
-        # Set TTL for inner packet (matching Swift's adaptiveTTL behavior)
-        inner_packet_data = bytearray(inner_packet)
-        inner_packet_data[2] = 7  # TTL for inner packet
-        inner_packet = bytes(inner_packet_data)
-        
-        debug_println(f"[PRIVATE] Created inner packet: {len(inner_packet)} bytes")
-        
-        try:
-            # Encrypt the ENTIRE inner packet using Noise (matching Swift)
-            encrypted = self.encryption_service.encrypt_for_peer(target_peer_id, inner_packet)
-            debug_println(f"[PRIVATE] Encrypted inner packet: {len(encrypted)} bytes")
-            
-            # Create outer Noise encrypted packet
-            packet = create_bitchat_packet_with_recipient(
-                self.my_peer_id,
-                target_peer_id,
-                MessageType.NOISE_ENCRYPTED,
-                encrypted,
-                None
-            )
-            
-            # Send with better error handling for BLE issues
-            try:
-                await self.send_packet(packet)
-                
-                # Display sent message
-                timestamp = datetime.now()
-                display = format_message_display(
-                    timestamp,
-                    self.nickname,
-                    content,
-                    True,
-                    False,
-                    None,
-                    target_nickname,
-                    self.nickname
-                )
-                print(f"\x1b[1A\r\033[K{display}")
-                
-            except Exception as send_error:
-                # Handle BLE send errors specifically
-                if "could not complete without blocking" in str(send_error):
-                    debug_println(f"[PRIVATE] BLE write blocked, will retry after longer delay")
-                    try:
-                        print(f"\033[90m» Message queued (BLE congestion), retrying...\033[0m")
-                    except BlockingIOError:
-                        pass  # Ignore even print errors
-                    
-                    # Retry after a longer delay
-                    await asyncio.sleep(0.5)
-                    try:
-                        await self.send_packet(packet)
-                        
-                        # Display sent message on successful retry
-                        timestamp = datetime.now()
-                        display = format_message_display(
-                            timestamp,
-                            self.nickname,
-                            content,
-                            True,
-                            False,
-                            None,
-                            target_nickname,
-                            self.nickname
-                        )
-                        print(f"\x1b[1A\r\033[K{display}")
-                        debug_println(f"[PRIVATE] Message sent successfully on retry")
-                        
-                    except Exception as retry_error:
-                        debug_println(f"[PRIVATE] Retry also failed: {retry_error}")
-                        try:
-                            print(f"\033[91m✗ Failed to send message (BLE congestion)\033[0m")
-                            print(f"\033[90m» Try again in a moment\033[0m")
-                        except BlockingIOError:
-                            pass  # Ignore print errors
-                else:
-                    # Other errors - re-raise
-                    raise send_error
-            
-        except Exception as e:
-            debug_println(f"[PRIVATE] Failed to encrypt private message: {e}")
-            print(f"\033[91m✗ Failed to send encrypted message to {target_nickname}\033[0m")
-            print(f"\033[90m» Error: {e}\033[0m")
+        # Session exists, send message directly
+        await self._send_private_message_direct(content, target_peer_id, target_nickname, message_id)
     
     async def background_scanner(self):
         """Background task to scan for peers when not connected"""
