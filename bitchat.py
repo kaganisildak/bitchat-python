@@ -990,39 +990,56 @@ class BitchatClient:
             # Swift creates: BitchatPacket(type: MessageType.message, ...) and encrypts the whole packet
             
             try:
-                # Parse the decrypted data as a complete BitchatPacket
-                inner_packet = parse_bitchat_packet(decrypted_payload)
-                if inner_packet:
-                    debug_println(f"[NOISE] Decrypted inner packet: type={inner_packet.msg_type.name if hasattr(inner_packet.msg_type, 'name') else inner_packet.msg_type}, sender={inner_packet.sender_id_str}")
-                    
-                    # Verify this is a MESSAGE packet (as created by Swift)
-                    if inner_packet.msg_type == MessageType.MESSAGE:
-                        # Parse the message payload from the inner packet
-                        try:
-                            message = parse_bitchat_message_payload(inner_packet.payload)
-                            
-                            # Check for duplicates
-                            if message.id not in self.processed_messages:
-                                self.bloom.add(message.id)
-                                self.processed_messages.add(message.id)
+                # Check if the decrypted data starts with version 1 (BitchatPacket)
+                if len(decrypted_payload) > 0 and decrypted_payload[0] == 1:
+                    # Parse the decrypted data as a complete BitchatPacket
+                    inner_packet = parse_bitchat_packet(decrypted_payload)
+                    if inner_packet:
+                        debug_println(f"[NOISE] Decrypted inner packet: type={inner_packet.msg_type.name if hasattr(inner_packet.msg_type, 'name') else inner_packet.msg_type}, sender={inner_packet.sender_id_str}")
+                        
+                        # Verify this is a MESSAGE packet (as created by Swift)
+                        if inner_packet.msg_type == MessageType.MESSAGE:
+                            # Parse the message payload from the inner packet
+                            try:
+                                message = parse_bitchat_message_payload(inner_packet.payload)
                                 
-                                # Display the message as private
-                                await self.display_message(message, packet, True)
-                                
-                                # Send ACK
-                                await self.send_delivery_ack(message.id, packet.sender_id_str, True)
-                            else:
-                                debug_println(f"[DUPLICATE] Ignoring duplicate encrypted message: {message.id}")
-                                
-                        except Exception as e:
-                            debug_println(f"[NOISE] Failed to parse inner message payload: {e}")
+                                # Check for duplicates
+                                if message.id not in self.processed_messages:
+                                    self.bloom.add(message.id)
+                                    self.processed_messages.add(message.id)
+                                    
+                                    # Display the message as private
+                                    await self.display_message(message, packet, True)
+                                    
+                                    # Send ACK
+                                    await self.send_delivery_ack(message.id, packet.sender_id_str, True)
+                                else:
+                                    debug_println(f"[DUPLICATE] Ignoring duplicate encrypted message: {message.id}")
+                                    
+                            except Exception as e:
+                                debug_println(f"[NOISE] Failed to parse inner message payload: {e}")
+                        else:
+                            debug_println(f"[NOISE] Unexpected inner packet type: {inner_packet.msg_type}, expected MESSAGE")
+                            # Handle other types of inner packets if needed
+                            await self.handle_packet(inner_packet, decrypted_payload)
                     else:
-                        debug_println(f"[NOISE] Unexpected inner packet type: {inner_packet.msg_type}, expected MESSAGE")
-                        # Handle other types of inner packets if needed
-                        await self.handle_packet(inner_packet, decrypted_payload)
+                        debug_println(f"[NOISE] Failed to parse decrypted data as BitchatPacket")
                 else:
-                    debug_println(f"[NOISE] Failed to parse decrypted data as BitchatPacket")
-                    
+                    # Handle non-BitchatPacket data (likely JSON acknowledgments or receipts)
+                    debug_println(f"[NOISE] Decrypted data does not start with version 1, likely acknowledgment/receipt")
+                    try:
+                        # Try to parse as JSON (iOS read receipts/acks start with newline + JSON)
+                        data_str = decrypted_payload.decode('utf-8').strip()
+                        if data_str.startswith('{') and data_str.endswith('}'):
+                            import json
+                            ack_data = json.loads(data_str)
+                            debug_println(f"[NOISE] Received acknowledgment: {ack_data}")
+                            # Handle acknowledgment data if needed
+                        else:
+                            debug_println(f"[NOISE] Unknown decrypted data format")
+                    except Exception as json_e:
+                        debug_println(f"[NOISE] Failed to parse as JSON acknowledgment: {json_e}")
+                        
             except Exception as e:
                 debug_println(f"[NOISE] Error parsing decrypted inner packet: {e}")
                 # Log the first few bytes for debugging
@@ -1036,6 +1053,11 @@ class BitchatClient:
                 debug_println(f"[NOISE] No session established with {packet.sender_id_str}")
             else:
                 debug_println(f"[NOISE] Session exists but decryption failed - possible key sync issue")
+                # If it's an InvalidTag error, it might be a nonce sync issue
+                if "InvalidTag" in str(e):
+                    debug_println(f"[NOISE] InvalidTag suggests nonce desync - this could be from iOS sending acknowledgments")
+                    # Don't reset the session here, just log it
+                    # The nonce is already incremented by the failed decrypt attempt
     
     async def handle_leave(self, packet: BitchatPacket):
         """Handle leave notification"""

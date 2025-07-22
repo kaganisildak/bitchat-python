@@ -400,6 +400,8 @@ class NoiseCipherState:
         except Exception as e:
             print(f"[NOISE] NoiseCipher.decrypt: FAILED with {type(e).__name__}: {e}")
             print(f"[NOISE] NoiseCipher.decrypt: key={self.key.hex()[:32]}...")
+            # Increment nonce even on failure to maintain sync (Noise protocol requirement)
+            self.nonce += 1
             raise
 
 @dataclass
