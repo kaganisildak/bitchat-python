@@ -79,14 +79,14 @@ class NoiseHandshakeState:
     
     def _mix_key(self, input_key_material: bytes):
         """Mix key material into chaining key and update cipher"""
-        print(f"[NOISE] _mix_key: input={input_key_material.hex()[:32]}...")
-        print(f"[NOISE] _mix_key: chaining_key={self.chaining_key.hex()[:32]}...")
+        #print(f"[NOISE] _mix_key: input={input_key_material.hex()[:32]}...")
+        #print(f"[NOISE] _mix_key: chaining_key={self.chaining_key.hex()[:32]}...")
         
         # HKDF extract step: tempKey = HMAC(chainingKey, inputKeyMaterial)
         hmac = HMAC(self.chaining_key, hashes.SHA256())
         hmac.update(input_key_material)
         temp_key = hmac.finalize()
-        print(f"[NOISE] _mix_key: temp_key={temp_key.hex()[:32]}...")
+        #print(f"[NOISE] _mix_key: temp_key={temp_key.hex()[:32]}...")
         
         # HKDF expand step: generate 2 outputs (matching Swift)
         # output1 = HMAC(tempKey, "" + 0x01)
@@ -99,8 +99,8 @@ class NoiseHandshakeState:
         hmac2.update(output1 + b'\x02')
         output2 = hmac2.finalize()
         
-        print(f"[NOISE] _mix_key: new_chaining_key={output1.hex()[:32]}...")
-        print(f"[NOISE] _mix_key: cipher_key={output2.hex()[:32]}...")
+        #print(f"[NOISE] _mix_key: new_chaining_key={output1.hex()[:32]}...")
+        #print(f"[NOISE] _mix_key: cipher_key={output2.hex()[:32]}...")
         
         self.chaining_key = output1
         self.cipher_state.initialize_key(output2)
@@ -152,18 +152,18 @@ class NoiseHandshakeState:
     
     def _decrypt_and_hash(self, ciphertext: bytes) -> bytes:
         """Decrypt ciphertext and mix it into hash"""
-        print(f"[NOISE] _decrypt_and_hash: ciphertext_len={len(ciphertext)}")
-        print(f"[NOISE] _decrypt_and_hash: has_cipher_key={self.cipher_state.has_key()}")
-        print(f"[NOISE] _decrypt_and_hash: hash_state={self.hash_state.hex()[:32]}...")
+        #print(f"[NOISE] _decrypt_and_hash: ciphertext_len={len(ciphertext)}")
+        #print(f"[NOISE] _decrypt_and_hash: has_cipher_key={self.cipher_state.has_key()}")
+        #print(f"[NOISE] _decrypt_and_hash: hash_state={self.hash_state.hex()[:32]}...")
         
         if self.cipher_state.has_key():
             plaintext = self.cipher_state.decrypt(ciphertext, self.hash_state)
             self._mix_hash(ciphertext)
-            print(f"[NOISE] _decrypt_and_hash: decrypted {len(ciphertext)} -> {len(plaintext)} bytes")
+            #print(f"[NOISE] _decrypt_and_hash: decrypted {len(ciphertext)} -> {len(plaintext)} bytes")
             return plaintext
         else:
             self._mix_hash(ciphertext)
-            print(f"[NOISE] _decrypt_and_hash: no cipher key, returning plaintext")
+            #print(f"[NOISE] _decrypt_and_hash: no cipher key, returning plaintext")
             return ciphertext
     
     def _dh(self, private_key: X25519PrivateKey, public_key: X25519PublicKey) -> bytes:
@@ -383,23 +383,23 @@ class NoiseCipherState:
         if not self.has_key():
             raise NoiseError("Cipher not initialized")
         
-        print(f"[NOISE] NoiseCipher.decrypt: nonce={self.nonce}, ciphertext_len={len(ciphertext)}, ad_len={len(associated_data)}")
-        print(f"[NOISE] NoiseCipher.decrypt: ad_hex={associated_data.hex()[:32]}...")
+        #print(f"[NOISE] NoiseCipher.decrypt: nonce={self.nonce}, ciphertext_len={len(ciphertext)}, ad_len={len(associated_data)}")
+        #print(f"[NOISE] NoiseCipher.decrypt: ad_hex={associated_data.hex()[:32]}...")
         
         # Create nonce from counter (12 bytes, matching Swift)
         # Swift puts counter at positions 4-12, zeros at 0-4
         nonce = b'\x00\x00\x00\x00' + self.nonce.to_bytes(8, byteorder='little')
-        print(f"[NOISE] NoiseCipher.decrypt: nonce_bytes={nonce.hex()}")
+        #print(f"[NOISE] NoiseCipher.decrypt: nonce_bytes={nonce.hex()}")
         
         cipher = ChaCha20Poly1305(self.key)
         try:
             plaintext = cipher.decrypt(nonce, ciphertext, associated_data)
             self.nonce += 1
-            print(f"[NOISE] NoiseCipher.decrypt: SUCCESS, plaintext_len={len(plaintext)}")
+            #print(f"[NOISE] NoiseCipher.decrypt: SUCCESS, plaintext_len={len(plaintext)}")
             return plaintext
         except Exception as e:
-            print(f"[NOISE] NoiseCipher.decrypt: FAILED with {type(e).__name__}: {e}")
-            print(f"[NOISE] NoiseCipher.decrypt: key={self.key.hex()[:32]}...")
+            #print(f"[NOISE] NoiseCipher.decrypt: FAILED with {type(e).__name__}: {e}")
+            #print(f"[NOISE] NoiseCipher.decrypt: key={self.key.hex()[:32]}...")
             # Increment nonce even on failure to maintain sync (Noise protocol requirement)
             self.nonce += 1
             raise
@@ -511,17 +511,17 @@ class EncryptionService:
         """Initiate Noise handshake with a peer"""
         # Clean up any existing handshake state and session
         if peer_id in self.handshake_states:
-            print(f"[NOISE] Cleaning up existing handshake state for {peer_id}")
+            #print(f"[NOISE] Cleaning up existing handshake state for {peer_id}")
             del self.handshake_states[peer_id]
         
         if peer_id in self.sessions:
-            print(f"[NOISE] Removing existing session for {peer_id}")
+            #print(f"[NOISE] Removing existing session for {peer_id}")
             del self.sessions[peer_id]
         
         # Create new handshake state as initiator
         handshake = NoiseHandshakeState(NoiseRole.INITIATOR, self.static_identity_key)
         self.handshake_states[peer_id] = handshake
-        print(f"[NOISE] Initiating handshake with {peer_id}")
+        #print(f"[NOISE] Initiating handshake with {peer_id}")
         
         # Write first message (-> e)
         return handshake.write_message()
@@ -539,29 +539,29 @@ class EncryptionService:
         # Check if we have an ongoing handshake
         if peer_id in self.handshake_states:
             handshake = self.handshake_states[peer_id]
-            print(f"[NOISE] Continuing handshake with {peer_id}, pattern {handshake.current_pattern}, role {handshake.role}")
+            #print(f"[NOISE] Continuing handshake with {peer_id}, pattern {handshake.current_pattern}, role {handshake.role}")
         else:
             # New handshake from peer - we are responder
             handshake = NoiseHandshakeState(NoiseRole.RESPONDER, self.static_identity_key)
             self.handshake_states[peer_id] = handshake
-            print(f"[NOISE] Starting new handshake with {peer_id} as responder")
+            #print(f"[NOISE] Starting new handshake with {peer_id} as responder")
         
         # Validate handshake state
         if handshake.current_pattern >= len(handshake.message_patterns):
-            print(f"[NOISE] Warning: Handshake already complete with {peer_id}, ignoring message")
+            #print(f"[NOISE] Warning: Handshake already complete with {peer_id}, ignoring message")
             return None
         
         try:
             # Read the incoming message
             payload = handshake.read_message(message)
-            print(f"[NOISE] Successfully processed pattern {handshake.current_pattern - 1} from {peer_id}")
+            #print(f"[NOISE] Successfully processed pattern {handshake.current_pattern - 1} from {peer_id}")
             
             # Check if we need to send a response
             response = None
             if not handshake.is_handshake_complete():
                 # Generate response message
                 response = handshake.write_message()
-                print(f"[NOISE] Generated response pattern {handshake.current_pattern - 1} for {peer_id}")
+                #print(f"[NOISE] Generated response pattern {handshake.current_pattern - 1} for {peer_id}")
             
             # Check if handshake is now complete
             if handshake.is_handshake_complete():
@@ -582,7 +582,7 @@ class EncryptionService:
                     
                     # Cleanup handshake state
                     del self.handshake_states[peer_id]
-                    print(f"[NOISE] Handshake completed with {peer_id}")
+                    #print(f"[NOISE] Handshake completed with {peer_id}")
                     
                     # Notify authentication
                     if self.on_peer_authenticated:
@@ -595,12 +595,12 @@ class EncryptionService:
             # Handshake failed, cleanup
             if peer_id in self.handshake_states:
                 del self.handshake_states[peer_id]
-            print(f"[NOISE] Handshake failed with {peer_id}: {type(e).__name__}: {e}")
-            print(f"[NOISE] Message length: {len(message)}, first 32 bytes: {message[:32].hex()}")
+            #print(f"[NOISE] Handshake failed with {peer_id}: {type(e).__name__}: {e}")
+            #print(f"[NOISE] Message length: {len(message)}, first 32 bytes: {message[:32].hex()}")
             import traceback
-            print(f"[NOISE] Handshake error details: {traceback.format_exc()}")
-            print(f"[NOISE] Original exception type: {type(e).__name__}")
-            print(f"[NOISE] Original exception message: {str(e)}")
+            #print(f"[NOISE] Handshake error details: {traceback.format_exc()}")
+            #print(f"[NOISE] Original exception type: {type(e).__name__}")
+            #print(f"[NOISE] Original exception message: {str(e)}")
             raise NoiseError(f"Handshake failed: {e}")
     
     def handle_handshake_message(self, peer_id: str, message: bytes) -> Optional[bytes]:
@@ -659,7 +659,7 @@ class EncryptionService:
     def clear_handshake_state(self, peer_id: str):
         """Clear handshake state for a peer (used when handshake fails)"""
         if peer_id in self.handshake_states:
-            print(f"[NOISE] Clearing failed handshake state for {peer_id}")
+            #print(f"[NOISE] Clearing failed handshake state for {peer_id}")
             del self.handshake_states[peer_id]
     
     def cleanup_old_sessions(self, max_age: float = 3600):
@@ -721,27 +721,27 @@ class EncryptionService:
         )
         return kdf.derive(password.encode('utf-8'))
     
-    def debug_handshake_state(self, peer_id: str = None):
-        """Debug handshake and session state"""
-        print(f"[NOISE DEBUG] ===== Encryption Service State =====")
-        print(f"[NOISE DEBUG] Total handshake states: {len(self.handshake_states)}")
-        print(f"[NOISE DEBUG] Total sessions: {len(self.sessions)}")
+    # def debug_handshake_state(self, peer_id: str = None):
+    #     """Debug handshake and session state"""
+    #     #print(f"[NOISE DEBUG] ===== Encryption Service State =====")
+    #     #print(f"[NOISE DEBUG] Total handshake states: {len(self.handshake_states)}")
+    #     #print(f"[NOISE DEBUG] Total sessions: {len(self.sessions)}")
         
-        if peer_id:
-            if peer_id in self.handshake_states:
-                hs = self.handshake_states[peer_id]
-                print(f"[NOISE DEBUG] {peer_id} handshake: pattern {hs.current_pattern}, role {hs.role}")
-            else:
-                print(f"[NOISE DEBUG] {peer_id}: no handshake state")
+    #     if peer_id:
+    #         if peer_id in self.handshake_states:
+    #             hs = self.handshake_states[peer_id]
+    #             #print(f"[NOISE DEBUG] {peer_id} handshake: pattern {hs.current_pattern}, role {hs.role}")
+    #         else:
+    #             #print(f"[NOISE DEBUG] {peer_id}: no handshake state")
                 
-            if peer_id in self.sessions:
-                print(f"[NOISE DEBUG] {peer_id}: has established session")
-            else:
-                print(f"[NOISE DEBUG] {peer_id}: no session")
-        else:
-            for pid, hs in self.handshake_states.items():
-                print(f"[NOISE DEBUG] {pid}: pattern {hs.current_pattern}, role {hs.role}")
+    #         if peer_id in self.sessions:
+    #             #print(f"[NOISE DEBUG] {peer_id}: has established session")
+    #         else:
+    #             #print(f"[NOISE DEBUG] {peer_id}: no session")
+    #     else:
+    #         for pid, hs in self.handshake_states.items():
+    #             #print(f"[NOISE DEBUG] {pid}: pattern {hs.current_pattern}, role {hs.role}")
                 
-            for pid in self.sessions.keys():
-                print(f"[NOISE DEBUG] {pid}: established session")
-        print(f"[NOISE DEBUG] =====================================")
+    #         for pid in self.sessions.keys():
+    #             #print(f"[NOISE DEBUG] {pid}: established session")
+    #     #print(f"[NOISE DEBUG] =====================================")
