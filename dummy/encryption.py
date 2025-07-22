@@ -14,8 +14,10 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from cryptography.hazmat.primitives.hmac import HMAC
 import hashlib
-import hmac
+
+from protocol import MessageType
 
 # Noise Protocol Constants
 NOISE_PROTOCOL_NAME = "Noise_XX_25519_ChaChaPoly_SHA256"
@@ -80,7 +82,9 @@ class NoiseHandshakeState:
     def _mix_key(self, input_key_material: bytes):
         """Mix key material into chaining key and update cipher"""
         # HKDF with 2 outputs
-        temp_key = hmac.new(self.chaining_key, input_key_material, hashlib.sha256).digest()
+        hmac = HMAC(self.chaining_key, hashes.SHA256())
+        hmac.update(input_key_material)
+        temp_key = hmac.finalize()
         
         hkdf = HKDF(
             algorithm=hashes.SHA256(),
@@ -88,19 +92,25 @@ class NoiseHandshakeState:
             salt=None,
             info=b'',
         )
+        
         output = hkdf.derive(temp_key)
         
         self.chaining_key = output[:32]
         self.cipher_state.initialize_key(output[32:])
-    
+
     def _mix_hash(self, data: bytes):
-        """Mix data into hash state"""
-        self.hash_state = hashlib.sha256(self.hash_state + data).digest()
-    
+        """Mix data into handshake hash"""
+        digest = hashes.Hash(hashes.SHA256())
+        digest.update(self.hash_state)
+        digest.update(data)
+        self.hash_state = digest.finalize()
+
     def _mix_key_and_hash(self, input_key_material: bytes):
         """Mix key material into both chaining key and hash"""
         # HKDF with 3 outputs
-        temp_key = hmac.new(self.chaining_key, input_key_material, hashlib.sha256).digest()
+        hmac = HMAC(self.chaining_key, hashes.SHA256())
+        hmac.update(input_key_material)
+        temp_key = hmac.finalize()
         
         hkdf = HKDF(
             algorithm=hashes.SHA256(),
@@ -108,10 +118,17 @@ class NoiseHandshakeState:
             salt=None,
             info=b'',
         )
+        
         output = hkdf.derive(temp_key)
         
         self.chaining_key = output[:32]
-        self._mix_hash(output[32:64])
+        temp_hash = output[32:64]
+        # Mix temp_hash into hash_state
+        digest = hashes.Hash(hashes.SHA256())
+        digest.update(self.hash_state)
+        digest.update(temp_hash)
+        self.hash_state = digest.finalize()
+        
         self.cipher_state.initialize_key(output[64:])
     
     def _encrypt_and_hash(self, plaintext: bytes) -> bytes:
@@ -280,7 +297,9 @@ class NoiseHandshakeState:
             raise NoiseError("Handshake not complete")
         
         # Split function: derive two cipher states
-        temp_key = hmac.new(self.chaining_key, b'', hashlib.sha256).digest()
+        hmac = HMAC(self.chaining_key, hashes.SHA256())
+        hmac.update(b'')
+        temp_key = hmac.finalize()
         
         hkdf = HKDF(
             algorithm=hashes.SHA256(),
@@ -396,9 +415,6 @@ class EncryptionService:
         # Handshake states in progress
         self.handshake_states: Dict[str, NoiseHandshakeState] = {}
         
-        # Store our peer ID for tie-breaking (set from outside)
-        self.my_peer_id: Optional[str] = None
-        
         # Callbacks
         self.on_peer_authenticated: Optional[Callable[[str, str], None]] = None
         self.on_handshake_required: Optional[Callable[[str], None]] = None
@@ -450,14 +466,6 @@ class EncryptionService:
             format=serialization.PublicFormat.Raw
         )
     
-    def get_public_key(self) -> bytes:
-        """Get public key bytes (alias for compatibility)"""
-        return self.get_public_key_bytes()
-    
-    def get_combined_public_key_data(self) -> bytes:
-        """Get combined public key data for legacy compatibility"""
-        return self.get_public_key_bytes()
-    
     def initiate_handshake(self, peer_id: str) -> bytes:
         """Initiate Noise handshake with a peer"""
         # Clean up any existing handshake state
@@ -474,28 +482,9 @@ class EncryptionService:
     def process_handshake_message(self, peer_id: str, message: bytes) -> Optional[bytes]:
         """Process incoming handshake message and return response if needed"""
         
-        # Check for role collision: both sides trying to initiate
+        # Check if we have an ongoing handshake
         if peer_id in self.handshake_states:
-            existing_handshake = self.handshake_states[peer_id]
-            # If we're an initiator at pattern 0 and receive a 32-byte message (ephemeral key),
-            # that means both sides tried to initiate. Use tie-breaker to resolve.
-            if (existing_handshake.role == NoiseRole.INITIATOR and 
-                existing_handshake.current_pattern == 0 and 
-                len(message) == 32):
-                
-                # Use peer ID comparison as tie-breaker (consistent with bitchat.py)
-                if self.my_peer_id and self.my_peer_id > peer_id:
-                    # We have higher ID, become responder
-                    print(f"[NOISE] Role collision detected with {peer_id[:8]}... becoming responder")
-                    del self.handshake_states[peer_id]
-                    handshake = NoiseHandshakeState(NoiseRole.RESPONDER, self.static_identity_key)
-                    self.handshake_states[peer_id] = handshake
-                else:
-                    # We have lower ID, stay as initiator - ignore their init message
-                    print(f"[NOISE] Role collision detected with {peer_id[:8]}... staying as initiator")
-                    return None
-            else:
-                handshake = existing_handshake
+            handshake = self.handshake_states[peer_id]
         else:
             # New handshake from peer - we are responder
             handshake = NoiseHandshakeState(NoiseRole.RESPONDER, self.static_identity_key)
@@ -542,21 +531,11 @@ class EncryptionService:
             # Handshake failed, cleanup
             if peer_id in self.handshake_states:
                 del self.handshake_states[peer_id]
-            import traceback
-            print(f"[NOISE] Handshake error details: {traceback.format_exc()}")
             raise NoiseError(f"Handshake failed: {e}")
-    
-    def handle_handshake_message(self, peer_id: str, message: bytes) -> Optional[bytes]:
-        """Legacy compatibility method - delegates to process_handshake_message"""
-        return self.process_handshake_message(peer_id, message)
     
     def has_established_session(self, peer_id: str) -> bool:
         """Check if we have an established session with peer"""
         return peer_id in self.sessions
-    
-    def is_session_established(self, peer_id: str) -> bool:
-        """Check if we have an established session with peer (alias for compatibility)"""
-        return self.has_established_session(peer_id)
     
     def encrypt(self, data: bytes, peer_id: str) -> bytes:
         """Encrypt data for a specific peer"""
@@ -568,11 +547,7 @@ class EncryptionService:
         session = self.sessions[peer_id]
         return session.encrypt(data)
     
-    def encrypt_for_peer(self, peer_id: str, data: bytes) -> bytes:
-        """Encrypt data for a specific peer (reordered args for compatibility)"""
-        return self.encrypt(data, peer_id)
-    
-    def decrypt_from_peer(self, peer_id: str, data: bytes) -> bytes:
+    def decrypt(self, data: bytes, peer_id: str) -> bytes:
         """Decrypt data from a specific peer"""
         if peer_id not in self.sessions:
             raise NoiseError(f"No session with peer {peer_id}")
@@ -585,12 +560,6 @@ class EncryptionService:
         if peer_id in self.sessions:
             return self.sessions[peer_id].get_fingerprint()
         return None
-    
-    def sign_data(self, data: bytes) -> bytes:
-        """Sign data with our identity key (placeholder for EdDSA)"""
-        # For now, return a simple hash-based signature
-        # In a real implementation, this would use EdDSA
-        return hashlib.sha256(data + self.get_public_key_bytes()).digest()
     
     def remove_session(self, peer_id: str):
         """Remove session with a peer"""
@@ -617,43 +586,4 @@ class EncryptionService:
     
     def get_active_peers(self) -> list:
         """Get list of peers with active sessions"""
-        return list(self.sessions.keys())
-    
-    # Channel encryption methods (basic implementation)
-    def encrypt_for_channel(self, message: str, channel: str, key: bytes, creator_fingerprint: str) -> bytes:
-        """Encrypt message for channel"""
-        cipher = ChaCha20Poly1305(key)
-        nonce = os.urandom(12)
-        plaintext = message.encode('utf-8')
-        return nonce + cipher.encrypt(nonce, plaintext, None)
-    
-    def decrypt_from_channel(self, data: bytes, channel: str, key: bytes, creator_fingerprint: str) -> str:
-        """Decrypt message from channel"""
-        if len(data) < 12:
-            raise ValueError("Invalid encrypted data")
-        
-        nonce = data[:12]
-        ciphertext = data[12:]
-        
-        cipher = ChaCha20Poly1305(key)
-        plaintext = cipher.decrypt(nonce, ciphertext, None)
-        return plaintext.decode('utf-8')
-    
-    def encrypt_with_key(self, data: bytes, key: bytes) -> bytes:
-        """Encrypt data with a specific key"""
-        cipher = ChaCha20Poly1305(key)
-        nonce = os.urandom(12)
-        return nonce + cipher.encrypt(nonce, data, None)
-    
-    @staticmethod
-    def derive_channel_key(password: str, channel: str) -> bytes:
-        """Derive a channel key from password and channel name"""
-        from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-        salt = channel.encode('utf-8')
-        kdf = PBKDF2HMAC(
-            algorithm=hashes.SHA256(),
-            length=32,
-            salt=salt,
-            iterations=100000,
-        )
-        return kdf.derive(password.encode('utf-8'))
+        return list(self.sessions.keys()) 
