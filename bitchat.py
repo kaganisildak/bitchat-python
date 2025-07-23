@@ -1541,9 +1541,9 @@ class BitchatClient:
             elif len(new_name) > 20:
                 print("\033[93m⚠ Nickname too long\033[0m")
                 print("\033[90mMaximum 20 characters allowed.\033[0m")
-            elif not all(c.isalnum() or c in '-_' for c in new_name):
+            elif any(c in '\n\r\t\0' for c in new_name):
                 print("\033[93m⚠ Invalid nickname\033[0m")
-                print("\033[90mNicknames can only contain letters, numbers, hyphens and underscores.\033[0m")
+                print("\033[90mNicknames cannot contain control characters.\033[0m")
             elif new_name in ["system", "all"]:
                 print("\033[93m⚠ Reserved nickname\033[0m")
                 print("\033[90mThis nickname is reserved and cannot be used.\033[0m")
