@@ -400,8 +400,7 @@ class NoiseCipherState:
         except Exception as e:
             #print(f"[NOISE] NoiseCipher.decrypt: FAILED with {type(e).__name__}: {e}")
             #print(f"[NOISE] NoiseCipher.decrypt: key={self.key.hex()[:32]}...")
-            # Increment nonce even on failure to maintain sync (Noise protocol requirement)
-            self.nonce += 1
+            # Do NOT increment nonce on failure - this causes desynchronization
             raise
 
 @dataclass
@@ -665,6 +664,10 @@ class EncryptionService:
             del self.sessions[peer_id]
         if peer_id in self.handshake_states:
             del self.handshake_states[peer_id]
+    
+    def clear_session(self, peer_id: str):
+        """Clear session with a peer (alias for remove_session)"""
+        self.remove_session(peer_id)
     
     def clear_handshake_state(self, peer_id: str):
         """Clear handshake state for a peer (used when handshake fails)"""

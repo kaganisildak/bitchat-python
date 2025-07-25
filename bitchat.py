@@ -103,6 +103,9 @@ class MessageType(IntEnum):
     CHANNEL_METADATA = 0x17
     VERSION_HELLO = 0x20
     VERSION_ACK = 0x21
+    PROTOCOL_ACK = 0x22
+    PROTOCOL_NACK = 0x23
+    SYSTEM_VALIDATION = 0x24
 
 @dataclass
 class Peer:
@@ -226,6 +229,10 @@ class BitchatClient:
         # Pending private messages waiting for handshake completion
         self.pending_private_messages: Dict[str, List[Tuple[str, str, str]]] = {}  # peer_id -> [(content, nickname, message_id)]
         
+        # Cache of recently seen encrypted payloads to handle duplicates
+        self.recent_encrypted_payloads: Dict[str, Tuple[str, float]] = {}  # payload_hash -> (sender_id, timestamp)
+        self.encrypted_cache_ttl = 30.0  # Keep encrypted payloads for 30 seconds
+        
         # Setup encryption service callbacks for better handshake handling
         self.encryption_service.on_peer_authenticated = self._on_peer_authenticated
         self.encryption_service.on_handshake_required = self._on_handshake_required
@@ -299,6 +306,8 @@ class BitchatClient:
             msg_id = message_id  # Use provided message ID if available
         
         debug_println(f"[PRIVATE] Created message payload: {len(payload)} bytes")
+        debug_println(f"[PRIVATE] Message ID: {msg_id}")
+        debug_println(f"[PRIVATE] Payload hex: {payload.hex()}")
         
         # Track for delivery
         self.delivery_tracker.track_message(msg_id, content, True)
@@ -318,10 +327,12 @@ class BitchatClient:
         inner_packet = bytes(inner_packet_data)
         
         debug_println(f"[PRIVATE] Created inner packet: {len(inner_packet)} bytes")
+        debug_println(f"[PRIVATE] Inner packet hex: {inner_packet.hex()}")
         
         # Encrypt the ENTIRE inner packet using Noise
         encrypted = self.encryption_service.encrypt_for_peer(target_peer_id, inner_packet)
         debug_println(f"[PRIVATE] Encrypted inner packet: {len(encrypted)} bytes")
+        debug_println(f"[PRIVATE] Encrypted hex: {encrypted.hex()}")
         
         # Create outer Noise encrypted packet
         packet = create_bitchat_packet_with_recipient(
@@ -331,6 +342,9 @@ class BitchatClient:
             encrypted,
             None
         )
+        
+        debug_println(f"[PRIVATE] Final outer packet: {len(packet)} bytes")
+        debug_println(f"[PRIVATE] Final packet hex: {packet.hex()}")
         
         # Send the packet
         await self.send_packet(packet)
@@ -556,14 +570,29 @@ class BitchatClient:
             if self.client:
                 self.handle_disconnect(self.client)
             return
+        
+        # Check if this is a critical message type that should never be fragmented
+        if len(packet) >= 2:  # Ensure we can read the message type
+            msg_type = MessageType(packet[1])
+            critical_types = {
+                MessageType.NOISE_IDENTITY_ANNOUNCE,
+                MessageType.NOISE_HANDSHAKE_INIT, 
+                MessageType.NOISE_HANDSHAKE_RESP,
+                MessageType.ANNOUNCE,
+                MessageType.LEAVE,
+                MessageType.CHANNEL_ANNOUNCE
+            }
+            should_fragment_packet = should_fragment(packet) and msg_type not in critical_types
+        else:
+            should_fragment_packet = should_fragment(packet)
             
-        if should_fragment(packet):
+        if should_fragment_packet:
             await self.send_packet_with_fragmentation(packet)
         else:
             write_with_response = len(packet) > 512
             try:
                 # Add small delay to prevent blocking errors
-                await asyncio.sleep(0.01)
+                await asyncio.sleep(0.02)  # Slightly longer delay
                 await self.client.write_gatt_char(
                     self.characteristic, 
                     packet, 
@@ -581,7 +610,7 @@ class BitchatClient:
                 if "could not complete without blocking" in str(e) or write_with_response:
                     try:
                         debug_println(f"[!] Write blocked, retrying without response after delay")
-                        await asyncio.sleep(0.1)  # Longer delay for retry
+                        await asyncio.sleep(0.2)  # Longer delay for retry
                         await self.client.write_gatt_char(
                             self.characteristic, 
                             packet, 
@@ -594,8 +623,9 @@ class BitchatClient:
                             if self.client:
                                 self.handle_disconnect(self.client)
                         elif "could not complete without blocking" in str(e2):
-                            debug_println(f"[!] Write still blocked after retry, dropping packet")
-                            # Don't raise, just log and continue
+                            debug_println(f"[!] Write still blocked after retry")
+                            # For private messages, let the caller handle re-queuing
+                            raise e2
                         else:
                             raise e2
                 else:
@@ -715,6 +745,26 @@ class BitchatClient:
             await self.handle_channel_announce(packet)
         elif packet.msg_type == MessageType.NOISE_IDENTITY_ANNOUNCE:
             await self.handle_noise_identity_announce(packet)
+        elif packet.msg_type == MessageType.PROTOCOL_NACK:
+            await self.handle_protocol_nack(packet)
+        elif packet.msg_type in [MessageType.PROTOCOL_ACK, MessageType.SYSTEM_VALIDATION, MessageType.VERSION_HELLO, MessageType.VERSION_ACK]:
+            # Handle other protocol messages gracefully
+            debug_println(f"[PROTOCOL] Received {packet.msg_type.name} from {packet.sender_id_str}")
+        else:
+            debug_println(f"[WARN] Unknown message type: {packet.msg_type}")
+    
+    async def handle_protocol_nack(self, packet: BitchatPacket):
+        """Handle protocol negative acknowledgment"""
+        try:
+            error_msg = packet.payload.decode('utf-8', errors='ignore').strip()
+            debug_println(f"[PROTOCOL_NACK] Received from {packet.sender_id_str}: {error_msg}")
+            
+            # If it's related to decryption failure, we might need to reset the session
+            if "decrypt" in error_msg.lower() or "session" in error_msg.lower():
+                debug_println(f"[PROTOCOL_NACK] Decryption-related NACK, clearing session with {packet.sender_id_str}")
+                self.encryption_service.clear_session(packet.sender_id_str)
+        except Exception as e:
+            debug_println(f"[PROTOCOL_NACK] Error handling NACK: {e}")
     
     async def handle_announce(self, packet: BitchatPacket):
         """Handle peer announcement"""
@@ -1024,9 +1074,9 @@ class BitchatClient:
             debug_println(f"[NOISE] process_handshake_message returned: {bool(response)}, response size: {len(response) if response else 0}")
             
             if response:
-                # Send final handshake message
+                # Send final handshake message as RESP type
                 final_packet = create_bitchat_packet_with_recipient(
-                    self.my_peer_id, packet.sender_id_str, MessageType.NOISE_HANDSHAKE_INIT, response, None  # Continue with same type
+                    self.my_peer_id, packet.sender_id_str, MessageType.NOISE_HANDSHAKE_RESP, response, None
                 )
                 # Set TTL to 3 like iOS
                 final_data = bytearray(final_packet)
@@ -1067,9 +1117,33 @@ class BitchatClient:
             # Convert bytearray to bytes for encryption service
             payload_bytes = bytes(packet.payload) if isinstance(packet.payload, bytearray) else packet.payload
             
+            # Check for duplicate encrypted payloads to avoid nonce desync
+            import hashlib
+            import time
+            payload_hash = hashlib.sha256(payload_bytes).hexdigest()[:16]  # First 16 chars of hash
+            current_time = time.time()
+            
+            # Clean old entries from cache
+            expired_keys = []
+            for key, (sender, timestamp) in self.recent_encrypted_payloads.items():
+                if current_time - timestamp > self.encrypted_cache_ttl:
+                    expired_keys.append(key)
+            for key in expired_keys:
+                del self.recent_encrypted_payloads[key]
+            
+            # Check if we've seen this payload recently
+            if payload_hash in self.recent_encrypted_payloads:
+                cached_sender, cached_time = self.recent_encrypted_payloads[payload_hash]
+                if cached_sender == packet.sender_id_str and (current_time - cached_time) < 10.0:
+                    debug_println(f"[NOISE] Ignoring duplicate encrypted payload from {packet.sender_id_str} (seen {current_time - cached_time:.1f}s ago)")
+                    return
+            
             # Decrypt the Noise encrypted payload using the improved method
             decrypted_payload = self.encryption_service.decrypt_from_peer(packet.sender_id_str, payload_bytes)
             debug_println(f"[NOISE] Successfully decrypted {len(decrypted_payload)} bytes from {packet.sender_id_str}")
+            
+            # Cache this payload as successfully processed
+            self.recent_encrypted_payloads[payload_hash] = (packet.sender_id_str, current_time)
             
             # The decrypted payload should be a complete BitchatPacket (matching Swift implementation)
             # Swift creates: BitchatPacket(type: MessageType.message, ...) and encrypts the whole packet
@@ -1096,8 +1170,8 @@ class BitchatClient:
                                     # Display the message as private
                                     await self.display_message(message, packet, True)
                                     
-                                    # Send ACK
-                                    await self.send_delivery_ack(message.id, packet.sender_id_str, True)
+                                    # Temporarily disable ACKs for encrypted messages to avoid retransmission issues
+                                    # await self.send_delivery_ack(message.id, packet.sender_id_str, True)
                                 else:
                                     debug_println(f"[DUPLICATE] Ignoring duplicate encrypted message: {message.id}")
                                     
@@ -1385,7 +1459,8 @@ class BitchatClient:
                 debug_println(f"[NOISE] Current sessions: {list(self.encryption_service.sessions.keys())}")
                 debug_println(f"[NOISE] Session established with {peer_id}: {self.encryption_service.is_session_established(peer_id)}")
                 # Check if we already have a session or ongoing handshake
-                if not self.encryption_service.is_session_established(peer_id):
+                has_ongoing_handshake = peer_id in self.encryption_service.handshake_states
+                if not self.encryption_service.is_session_established(peer_id) and not has_ongoing_handshake:
                     try:
                         handshake_message = self.encryption_service.initiate_handshake(peer_id)
                         handshake_packet = create_bitchat_packet_with_recipient(
@@ -1413,7 +1488,6 @@ class BitchatClient:
         """Parse binary format noise identity announcement matching iOS appendData format"""
         try:
             offset = 0
-            
             debug_println(f"[NOISE] Parsing binary announcement, total length: {len(data)}")
             debug_println(f"[NOISE] Raw data (hex): {data.hex()}")
             
@@ -1437,7 +1511,7 @@ class BitchatClient:
             offset += 8
             debug_println(f"[NOISE] Peer ID: {peer_id} (offset now: {offset})")
             
-            # Read publicKey using appendData format (1-byte length prefix for 255 max)
+            # Read publicKey using appendData format (1-byte length prefix)
             if offset >= len(data):
                 debug_println("[NOISE] Error: Not enough data for publicKey length")
                 return None
@@ -1456,7 +1530,7 @@ class BitchatClient:
             else:
                 debug_println(f"[NOISE] Public key: (empty) (offset now: {offset})")
             
-            # Read signingPublicKey using appendData format (1-byte length prefix for 255 max)
+            # Read signingPublicKey using appendData format (1-byte length prefix)
             if offset >= len(data):
                 debug_println("[NOISE] Error: Not enough data for signingPublicKey length")
                 return None
@@ -1471,106 +1545,103 @@ class BitchatClient:
             offset += signing_key_len
             debug_println(f"[NOISE] Signing public key: {signing_public_key.hex()} (offset now: {offset})")
             
-            # Based on actual packet analysis, there are additional key fields in iOS implementation
-            # Read through all additional data fields until we find the nickname
-            extra_field_count = 0
-            while offset < len(data) - 10 and extra_field_count < 5:  # Safety limit
+            # Parse variable-length fields until we find nickname and timestamp
+            nickname = ""
+            timestamp = int(time.time())
+            
+            # Look for patterns: we expect nickname, timestamp, optional previous peer ID, signature
+            fields_parsed = 0
+            while offset < len(data) and fields_parsed < 10:  # Safety limit
+                if offset >= len(data):
+                    break
+                    
                 field_len = data[offset]
                 offset += 1
-                debug_println(f"[NOISE] Extra field {extra_field_count} length: {field_len} (offset now: {offset})")
+                debug_println(f"[NOISE] Field {fields_parsed} length: {field_len} (offset now: {offset})")
                 
-                if field_len == 5:  # Potential nickname field
-                    if offset + field_len <= len(data):
-                        potential_nickname = data[offset:offset+field_len]
-                        try:
-                            nickname_str = potential_nickname.decode('utf-8')
-                            if nickname_str.isascii() and all(c.isprintable() for c in nickname_str):
-                                # This looks like a valid nickname
-                                nickname = nickname_str
-                                offset += field_len
-                                debug_println(f"[NOISE] Found nickname: '{nickname}' (offset now: {offset})")
-                                break
-                        except UnicodeDecodeError:
-                            pass
+                if field_len == 0:
+                    fields_parsed += 1
+                    continue
                 
-                # Skip this field
-                if field_len > 0:
-                    if offset + field_len > len(data):
-                        debug_println(f"[NOISE] Field {extra_field_count} extends beyond data, truncating")
+                if offset + field_len > len(data):
+                    debug_println(f"[NOISE] Field {fields_parsed} extends beyond data")
+                    break
+                
+                field_data = data[offset:offset+field_len]
+                
+                # Try to identify field based on length and content
+                if 1 <= field_len <= 20:  # Potential nickname
+                    try:
+                        potential_nickname = field_data.decode('utf-8')
+                        if potential_nickname.isascii() and all(c.isprintable() for c in potential_nickname):
+                            nickname = potential_nickname
+                            debug_println(f"[NOISE] Found nickname: '{nickname}' at field {fields_parsed}")
+                    except UnicodeDecodeError:
+                        pass
+                
+                # Log field data for debugging
+                if field_len <= 32:
+                    debug_println(f"[NOISE] Field {fields_parsed} data: {field_data.hex()}")
+                else:
+                    debug_println(f"[NOISE] Field {fields_parsed}: large field ({field_len} bytes)")
+                
+                offset += field_len
+                fields_parsed += 1
+                
+                # Check if we have enough data left for timestamp (8 bytes) + signature (at least 1 byte length + data)
+                if offset + 9 <= len(data):
+                    # Try to read timestamp at current position
+                    potential_timestamp_data = data[offset:offset+8]
+                    potential_timestamp_ms = int.from_bytes(potential_timestamp_data, byteorder='big')
+                    
+                    # Check if this looks like a reasonable timestamp (year 2020-2030)
+                    if 1577836800000 <= potential_timestamp_ms <= 1893456000000:  # 2020-2030 in ms
+                        timestamp = potential_timestamp_ms / 1000.0
+                        offset += 8
+                        debug_println(f"[NOISE] Found timestamp: {timestamp} ({potential_timestamp_ms}ms) at offset {offset-8}")
                         break
-                    if field_len <= 64:  # Only log small fields to avoid spam
-                        field_data = data[offset:offset+field_len]
-                        debug_println(f"[NOISE] Extra field {extra_field_count} data: {field_data.hex()[:32]}{'...' if len(field_data) > 16 else ''}")
-                    else:
-                        debug_println(f"[NOISE] Extra field {extra_field_count}: large field ({field_len} bytes), skipping log")
-                    
-                    # Use this field as signing key if we don't have one yet
-                    if len(signing_public_key) == 0 and field_len == 32:
-                        signing_public_key = data[offset:offset+field_len]
-                        debug_println(f"[NOISE] Using extra field {extra_field_count} as signing public key")
-                    
-                    offset += field_len
-                
-                extra_field_count += 1
             
-            # If we didn't find a nickname in the loop above, try the old method
-            if not nickname:
-                debug_println(f"[NOISE] No nickname found in extra fields, trying traditional parsing at offset {offset}")
-                if offset < len(data):
-                    nickname_len = data[offset]
-                    offset += 1
-                    debug_println(f"[NOISE] Traditional nickname length: {nickname_len} (offset now: {offset})")
-                    
-                    if nickname_len > 0 and offset + nickname_len <= len(data):
-                        nickname_bytes = data[offset:offset+nickname_len]
-                        try:
-                            nickname = nickname_bytes.decode('utf-8')
-                            offset += nickname_len
-                            debug_println(f"[NOISE] Traditional nickname: '{nickname}' (offset now: {offset})")
-                        except UnicodeDecodeError:
-                            debug_println(f"[NOISE] Traditional nickname decode failed: {nickname_bytes.hex()}")
-                    else:
-                        debug_println(f"[NOISE] Traditional nickname: (empty) (offset now: {offset})")
+            # If we didn't find timestamp in the fields, try to read it directly
+            if timestamp == int(time.time()) and offset + 8 <= len(data):
+                timestamp_data = data[offset:offset+8]
+                timestamp_ms = int.from_bytes(timestamp_data, byteorder='big')
+                if 1577836800000 <= timestamp_ms <= 1893456000000:  # Reasonable timestamp range
+                    timestamp = timestamp_ms / 1000.0
+                    offset += 8
+                    debug_println(f"[NOISE] Direct timestamp read: {timestamp} ({timestamp_ms}ms)")
             
-            # If we still don't have a nickname, set it to empty
-            if not nickname:
-                nickname = ""
-                debug_println(f"[NOISE] Final nickname: (empty)")
-            
-            # Read timestamp using appendDate format (8-byte UInt64 in milliseconds, big-endian)
-            if offset + 8 > len(data):
-                debug_println(f"[NOISE] Error: Not enough data for timestamp, need 8 bytes, have {len(data) - offset}")
-                return None
-            timestamp_ms = int.from_bytes(data[offset:offset+8], byteorder='big')
-            offset += 8
-            timestamp = timestamp_ms / 1000.0  # Convert from milliseconds to seconds
-            debug_println(f"[NOISE] Timestamp: {timestamp} ({timestamp_ms}ms)")
-            
-            # Read previousPeerID if present (8 bytes)
+            # Previous peer ID if flag is set
             previous_peer_id = None
-            if has_previous_peer_id:
-                if offset + 8 > len(data):
-                    debug_println("[NOISE] Error: Not enough data for previousPeerID")
-                    return None
-                previous_peer_id = data[offset:offset+8].hex()
+            if has_previous_peer_id and offset + 8 <= len(data):
+                prev_peer_id_bytes = data[offset:offset+8]
+                previous_peer_id = prev_peer_id_bytes.hex()
                 offset += 8
                 debug_println(f"[NOISE] Previous peer ID: {previous_peer_id}")
             
-            # Read signature using appendData format (1-byte length prefix for 255 max)
-            if offset >= len(data):
-                debug_println("[NOISE] Error: Not enough data for signature length")
-                return None
-            signature_len = data[offset]
-            offset += 1
+            # Try to read signature - it might be at the end with length prefix
+            signature = b""
+            if offset < len(data):
+                remaining_bytes = len(data) - offset
+                debug_println(f"[NOISE] Attempting signature read with {remaining_bytes} bytes remaining")
+                
+                # Try length-prefixed signature
+                if remaining_bytes >= 2:  # At least 1 byte length + 1 byte data
+                    sig_len = data[offset]
+                    if sig_len > 0 and offset + 1 + sig_len <= len(data):
+                        signature = data[offset+1:offset+1+sig_len]
+                        debug_println(f"[NOISE] Found signature (length-prefixed): {signature.hex()}")
+                    elif remaining_bytes >= 32:  # Try fixed-size signature
+                        # Use remaining bytes as signature (common for fixed-size signatures)
+                        signature = data[offset:]
+                        debug_println(f"[NOISE] Using remaining bytes as signature: {signature.hex()}")
+                    else:
+                        debug_println(f"[NOISE] Invalid signature length {sig_len} or not enough data")
+                elif remaining_bytes > 0:
+                    # Use all remaining bytes as signature
+                    signature = data[offset:]
+                    debug_println(f"[NOISE] Using all remaining bytes as signature: {signature.hex()}")
             
-            if offset + signature_len > len(data):
-                debug_println(f"[NOISE] Error: Not enough data for signature, need {signature_len} bytes, have {len(data) - offset}")
-                return None
-            signature = data[offset:offset+signature_len]
-            offset += signature_len
-            debug_println(f"[NOISE] Signature length: {signature_len}, sig: {signature.hex()}")
-            
-            debug_println(f"[NOISE] Total parsed {offset} bytes out of {len(data)} available")
+            debug_println(f"[NOISE] Parse complete - nickname: '{nickname}', timestamp: {timestamp}")
             
             return {
                 'peerID': peer_id,
@@ -1664,7 +1735,7 @@ class BitchatClient:
         # Encrypt if private
         if is_private:
             try:
-                ack_payload = self.encryption_service.encrypt(ack_payload, sender_id)
+                ack_payload = self.encryption_service.encrypt_for_peer(sender_id, ack_payload)
             except:
                 pass
         
@@ -2422,12 +2493,17 @@ class BitchatClient:
             
             # Check if we've recently tried to handshake with this peer (matching Swift logic)
             current_time = time.time()
+            has_ongoing_handshake = target_peer_id in self.encryption_service.handshake_states
             if target_peer_id in self.handshake_attempt_times:
                 last_attempt = self.handshake_attempt_times[target_peer_id]
-                if current_time - last_attempt < self.handshake_timeout:
-                    debug_println(f"[NOISE] Skipping handshake with {target_peer_id} - too recent (last attempt {current_time - last_attempt:.1f}s ago)")
+                if current_time - last_attempt < self.handshake_timeout or has_ongoing_handshake:
+                    debug_println(f"[NOISE] Skipping handshake with {target_peer_id} - too recent (last attempt {current_time - last_attempt:.1f}s ago) or ongoing handshake")
                     print(f"\033[90m» Handshake already in progress with {target_nickname}, please wait...\033[0m")
                     return
+            elif has_ongoing_handshake:
+                debug_println(f"[NOISE] Skipping handshake with {target_peer_id} - handshake already in progress")
+                print(f"\033[90m» Handshake already in progress with {target_nickname}, please wait...\033[0m")
+                return
             
             # Record handshake attempt time
             self.handshake_attempt_times[target_peer_id] = current_time
@@ -2644,7 +2720,7 @@ def unpad_packet(data: bytes) -> bytes:
 
 def parse_bitchat_packet(data: bytes) -> BitchatPacket:
     """Parse a BitChat packet from raw bytes"""
-    HEADER_SIZE = 13
+    HEADER_SIZE = 17  # Updated to include sequence number (4 bytes)
     SENDER_ID_SIZE = 8
     RECIPIENT_ID_SIZE = 8
     
@@ -2670,8 +2746,15 @@ def parse_bitchat_packet(data: bytes) -> BitchatPacket:
     ttl = data[offset]
     offset += 1
     
-    # Timestamp (skip)
+    # Timestamp (8 bytes)
+    timestamp_data = data[offset:offset+8]
+    timestamp = int.from_bytes(timestamp_data, byteorder='big')
     offset += 8
+    
+    # Sequence number (4 bytes) - new field
+    sequence_data = data[offset:offset+4]
+    sequence_number = int.from_bytes(sequence_data, byteorder='big')
+    offset += 4
     
     # Flags
     flags = data[offset]
@@ -2729,46 +2812,104 @@ def parse_bitchat_packet(data: bytes) -> BitchatPacket:
 
 def parse_bitchat_message_payload(data: bytes) -> BitchatMessage:
     """Parse message payload, matching Swift implementation"""
+    if len(data) < 13:  # Minimum required for flags + timestamp + ID length + sender length + content length
+        debug_println(f"[PARSE] Message payload too small: {len(data)} bytes")
+        raise ValueError("Message payload too small")
+    
     offset = 0
 
     # 1. Flags
     flags = data[offset]; offset += 1
-    is_private = (flags & MSG_FLAG_IS_PRIVATE) != 0
-    has_sender_peer_id = (flags & MSG_FLAG_HAS_SENDER_PEER_ID) != 0
-    has_channel = (flags & MSG_FLAG_HAS_CHANNEL) != 0
-    is_encrypted = (flags & MSG_FLAG_IS_ENCRYPTED) != 0
+    is_relay = (flags & 0x01) != 0
+    is_private = (flags & 0x02) != 0  
+    has_original_sender = (flags & 0x04) != 0
+    has_recipient_nickname = (flags & 0x08) != 0
+    has_sender_peer_id = (flags & 0x10) != 0
+    has_mentions = (flags & 0x20) != 0
 
-    # 2. Timestamp
-    offset += 8 # Skip timestamp
+    # 2. Timestamp (8 bytes, milliseconds since epoch)
+    if offset + 8 > len(data):
+        debug_println(f"[PARSE] Not enough data for timestamp at offset {offset}")
+        raise ValueError("Not enough data for timestamp")
+    timestamp_data = data[offset:offset+8]
+    timestamp_ms = int.from_bytes(timestamp_data, byteorder='big')
+    offset += 8
 
     # 3. ID
+    if offset >= len(data):
+        debug_println(f"[PARSE] Not enough data for ID length at offset {offset}")
+        raise ValueError("Not enough data for ID length")
     id_len = data[offset]; offset += 1
-    id_str = data[offset:offset+id_len].decode('utf-8'); offset += id_len
+    if offset + id_len > len(data):
+        debug_println(f"[PARSE] Not enough data for ID at offset {offset}, need {id_len} bytes")
+        raise ValueError("Not enough data for ID")
+    id_str = data[offset:offset+id_len].decode('utf-8', errors='ignore'); offset += id_len
 
     # 4. Sender
+    if offset >= len(data):
+        debug_println(f"[PARSE] Not enough data for sender length at offset {offset}")
+        raise ValueError("Not enough data for sender length")
     sender_len = data[offset]; offset += 1
-    sender = data[offset:offset+sender_len].decode('utf-8'); offset += sender_len
+    if offset + sender_len > len(data):
+        debug_println(f"[PARSE] Not enough data for sender at offset {offset}, need {sender_len} bytes")
+        raise ValueError("Not enough data for sender")
+    sender = data[offset:offset+sender_len].decode('utf-8', errors='ignore'); offset += sender_len
 
     # 5. Content
+    if offset + 2 > len(data):
+        debug_println(f"[PARSE] Not enough data for content length at offset {offset}")
+        raise ValueError("Not enough data for content length")
     content_len = struct.unpack('>H', data[offset:offset+2])[0]; offset += 2
+    if offset + content_len > len(data):
+        debug_println(f"[PARSE] Not enough data for content at offset {offset}, need {content_len} bytes")
+        raise ValueError("Not enough data for content")
     content_bytes = data[offset:offset+content_len]; offset += content_len
-    content = ""
-    encrypted_content = None
-    if is_encrypted:
-        encrypted_content = content_bytes
-    else:
-        content = content_bytes.decode('utf-8', errors='ignore')
+    content = content_bytes.decode('utf-8', errors='ignore')
 
-    # 6. Sender Peer ID
-    if has_sender_peer_id:
+    # Optional fields - check bounds before accessing
+    
+    # 6. Original sender (if flag set)
+    original_sender = None
+    if has_original_sender and offset < len(data):
+        orig_len = data[offset]; offset += 1
+        if offset + orig_len <= len(data):
+            original_sender = data[offset:offset+orig_len].decode('utf-8', errors='ignore')
+            offset += orig_len
+
+    # 7. Recipient nickname (if flag set)  
+    recipient_nickname = None
+    if has_recipient_nickname and offset < len(data):
+        recip_len = data[offset]; offset += 1
+        if offset + recip_len <= len(data):
+            recipient_nickname = data[offset:offset+recip_len].decode('utf-8', errors='ignore')
+            offset += recip_len
+
+    # 8. Sender Peer ID (if flag set)
+    sender_peer_id = None
+    if has_sender_peer_id and offset < len(data):
         peer_id_len = data[offset]; offset += 1
-        offset += peer_id_len # Skip peer id
+        if offset + peer_id_len <= len(data):
+            sender_peer_id = data[offset:offset+peer_id_len].decode('utf-8', errors='ignore')
+            offset += peer_id_len
 
-    # 7. Channel
+    # 9. Mentions array (if flag set)
+    mentions = None
+    if has_mentions and offset < len(data):
+        mention_count = data[offset]; offset += 1
+        if mention_count > 0:
+            mentions = []
+            for _ in range(mention_count):
+                if offset < len(data):
+                    mention_len = data[offset]; offset += 1
+                    if offset + mention_len <= len(data):
+                        mention = data[offset:offset+mention_len].decode('utf-8', errors='ignore')
+                        mentions.append(mention)
+                        offset += mention_len
+
+    # For compatibility with old message structure, derive channel from context if needed
     channel = None
-    if has_channel:
-        channel_len = data[offset]; offset += 1
-        channel = data[offset:offset+channel_len].decode('utf-8')
+    is_encrypted = False  # This is handled differently in the new format
+    encrypted_content = None
 
     return BitchatMessage(id_str, content, channel, is_encrypted, encrypted_content)
 
@@ -2805,9 +2946,13 @@ def create_bitchat_packet_with_recipient(sender_id: str, recipient_id: Optional[
     # TTL
     packet.append(7)
     
-    # Timestamp
+    # Timestamp (8 bytes)
     timestamp_ms = int(time.time() * 1000)
     packet.extend(struct.pack('>Q', timestamp_ms))
+    
+    # Sequence number (4 bytes) - new field, using timestamp as sequence for now
+    sequence_number = int(time.time() * 1000) & 0xFFFFFFFF  # Use lower 32 bits of timestamp
+    packet.extend(struct.pack('>I', sequence_number))
     
     # Flags
     flags = 0
@@ -2887,48 +3032,67 @@ def create_bitchat_message_payload_full(sender: str, content: str, channel: Opti
     data = bytearray()
     message_id = str(uuid.uuid4())
 
-    # 1. Flags
-    flags = 0
-    if is_private: flags |= MSG_FLAG_IS_PRIVATE
-    if sender_peer_id: flags |= MSG_FLAG_HAS_SENDER_PEER_ID
-    if channel: flags |= MSG_FLAG_HAS_CHANNEL
-    if is_encrypted: flags |= MSG_FLAG_IS_ENCRYPTED
-    data.append(flags)
+    debug_println(f"[MSG_CREATE] Creating message payload:")
+    debug_println(f"[MSG_CREATE]   sender: {sender}")
+    debug_println(f"[MSG_CREATE]   content: {content}")
+    debug_println(f"[MSG_CREATE]   channel: {channel}")
+    debug_println(f"[MSG_CREATE]   is_private: {is_private}")
+    debug_println(f"[MSG_CREATE]   sender_peer_id: {sender_peer_id}")
+    debug_println(f"[MSG_CREATE]   is_encrypted: {is_encrypted}")
+    debug_println(f"[MSG_CREATE]   message_id: {message_id}")
 
-    # 2. Timestamp
+    # 1. Flags - using new Swift format flags
+    flags = 0
+    # is_relay = False (bit 0)
+    if is_private: flags |= 0x02  # bit 1
+    # has_original_sender = False (bit 2) 
+    # has_recipient_nickname = False (bit 3)
+    if sender_peer_id: flags |= 0x10  # bit 4: has_sender_peer_id
+    # has_mentions = False (bit 5)
+    data.append(flags)
+    debug_println(f"[MSG_CREATE]   flags: 0x{flags:02x}")
+
+    # 2. Timestamp (in milliseconds)
     timestamp_ms = int(time.time() * 1000)
     data.extend(struct.pack('>Q', timestamp_ms))
+    debug_println(f"[MSG_CREATE]   timestamp: {timestamp_ms}")
 
     # 3. ID
     id_bytes = message_id.encode('utf-8')
-    data.append(len(id_bytes))
-    data.extend(id_bytes)
+    data.append(min(len(id_bytes), 255))
+    data.extend(id_bytes[:255])
+    debug_println(f"[MSG_CREATE]   id_length: {min(len(id_bytes), 255)}")
 
     # 4. Sender
     sender_bytes = sender.encode('utf-8')
-    data.append(len(sender_bytes))
-    data.extend(sender_bytes)
+    data.append(min(len(sender_bytes), 255))
+    data.extend(sender_bytes[:255])
+    debug_println(f"[MSG_CREATE]   sender_length: {min(len(sender_bytes), 255)}")
 
     # 5. Content
-    payload_bytes = encrypted_content if is_encrypted and encrypted_content else content.encode('utf-8')
-    data.extend(struct.pack('>H', len(payload_bytes)))
-    data.extend(payload_bytes)
+    content_bytes = encrypted_content if is_encrypted and encrypted_content else content.encode('utf-8')
+    content_length = min(len(content_bytes), 65535)
+    data.extend(struct.pack('>H', content_length))
+    data.extend(content_bytes[:content_length])
+    debug_println(f"[MSG_CREATE]   content_length: {content_length}")
 
-    # 6. Sender Peer ID
+    # Optional fields based on flags:
+    
+    # Original sender (not used, skip)
+    
+    # Recipient nickname (not used, skip)
+    
+    # Sender Peer ID (if flag set)
     if sender_peer_id:
         peer_id_bytes = sender_peer_id.encode('utf-8')
-        data.append(len(peer_id_bytes))
-        data.extend(peer_id_bytes)
+        data.append(min(len(peer_id_bytes), 255))
+        data.extend(peer_id_bytes[:255])
+        debug_println(f"[MSG_CREATE]   peer_id_length: {min(len(peer_id_bytes), 255)}")
 
-    # 7. Channel
-    if channel:
-        channel_bytes = channel.encode('utf-8')
-        data.append(len(channel_bytes))
-        data.extend(channel_bytes)
+    # Mentions array (not used, skip)
 
-    return (bytes(data), message_id)
-
-
+    debug_println(f"[MSG_CREATE]   total_payload_size: {len(data)} bytes")
+    debug_println(f"[MSG_CREATE]   payload_hex: {bytes(data).hex()}")
     
     return (bytes(data), message_id)
 
@@ -2951,7 +3115,9 @@ def create_encrypted_channel_message_payload(sender: str, content: str, channel:
 
 def should_fragment(packet: bytes) -> bool:
     """Check if packet needs fragmentation"""
-    return len(packet) > 500
+    # iOS uses 256-byte minimum padding, so we need a higher threshold
+    # to avoid fragmenting normal padded packets
+    return len(packet) > 1500
 
 def should_send_ack(is_private: bool, channel: Optional[str], mentions: Optional[List[str]],
                    my_nickname: str, active_peer_count: int) -> bool:
