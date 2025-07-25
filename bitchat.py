@@ -233,6 +233,9 @@ class BitchatClient:
         self.recent_encrypted_payloads: Dict[str, Tuple[str, float]] = {}  # payload_hash -> (sender_id, timestamp)
         self.encrypted_cache_ttl = 30.0  # Keep encrypted payloads for 30 seconds
         
+        # Sequence number counter for packet creation (to avoid duplicates)
+        self.sequence_counter = int(time.time() * 1000) & 0xFFFFFFFF
+        
         # Setup encryption service callbacks for better handshake handling
         self.encryption_service.on_peer_authenticated = self._on_peer_authenticated
         self.encryption_service.on_handshake_required = self._on_handshake_required
@@ -248,6 +251,11 @@ class BitchatClient:
         """Callback when handshake is required for a peer"""
         debug_println(f"[NOISE] Handshake required for peer {peer_id}")
         # The handshake will be initiated when trying to send private messages
+    
+    def get_next_sequence_number(self) -> int:
+        """Get the next sequence number for packet creation"""
+        self.sequence_counter = (self.sequence_counter + 1) & 0xFFFFFFFF
+        return self.sequence_counter
     
     async def send_pending_private_messages(self, peer_id: str):
         """Send all pending private messages for a peer after handshake completes"""
@@ -312,57 +320,60 @@ class BitchatClient:
         # Track for delivery
         self.delivery_tracker.track_message(msg_id, content, True)
         
-        # Create INNER packet (BitchatPacket with MESSAGE type) that will be encrypted
-        inner_packet = create_bitchat_packet_with_recipient(
-            self.my_peer_id,
-            target_peer_id,
-            MessageType.MESSAGE,
-            payload,
-            None
-        )
-        
-        # Set TTL for inner packet
-        inner_packet_data = bytearray(inner_packet)
-        inner_packet_data[2] = 7  # TTL for inner packet
-        inner_packet = bytes(inner_packet_data)
-        
-        debug_println(f"[PRIVATE] Created inner packet: {len(inner_packet)} bytes")
-        debug_println(f"[PRIVATE] Inner packet hex: {inner_packet.hex()}")
-        
-        # Encrypt the ENTIRE inner packet using Noise
-        encrypted = self.encryption_service.encrypt_for_peer(target_peer_id, inner_packet)
-        debug_println(f"[PRIVATE] Encrypted inner packet: {len(encrypted)} bytes")
-        debug_println(f"[PRIVATE] Encrypted hex: {encrypted.hex()}")
-        
-        # Create outer Noise encrypted packet
-        packet = create_bitchat_packet_with_recipient(
-            self.my_peer_id,
-            target_peer_id,
-            MessageType.NOISE_ENCRYPTED,
-            encrypted,
-            None
-        )
-        
-        debug_println(f"[PRIVATE] Final outer packet: {len(packet)} bytes")
-        debug_println(f"[PRIVATE] Final packet hex: {packet.hex()}")
-        
-        # Send the packet
-        await self.send_packet(packet)
-        
-        # Display sent message
-        timestamp = datetime.now()
-        display = format_message_display(
-            timestamp,
-            self.nickname,
-            content,
-            True,
-            False,
-            None,
-            target_nickname,
-            self.nickname
-        )
-        print(f"\x1b[1A\r\033[K{display}")
-        debug_println(f"[PRIVATE] Successfully sent message to {target_peer_id}")
+        # Retry loop for BLE congestion - handle encryption AND sending together
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                # Create INNER packet (BitchatPacket with MESSAGE type) that will be encrypted
+                inner_packet = create_bitchat_packet_with_recipient(
+                    self.my_peer_id,
+                    target_peer_id,
+                    MessageType.MESSAGE,
+                    payload,
+                    None,
+                    self
+                )
+                
+                # Set TTL for inner packet
+                inner_packet_data = bytearray(inner_packet)
+                inner_packet_data[2] = 7  # TTL for inner packet
+                inner_packet = bytes(inner_packet_data)
+                
+                debug_println(f"[PRIVATE] Created inner packet: {len(inner_packet)} bytes")
+                debug_println(f"[PRIVATE] Inner packet hex: {inner_packet.hex()}")
+                
+                # Encrypt the ENTIRE inner packet using Noise (this increments nonce)
+                encrypted = self.encryption_service.encrypt_for_peer(target_peer_id, inner_packet)
+                debug_println(f"[PRIVATE] Encrypted inner packet: {len(encrypted)} bytes (attempt {attempt + 1})")
+                debug_println(f"[PRIVATE] Encrypted hex: {encrypted.hex()}")
+                
+                # Create outer Noise encrypted packet
+                packet = create_bitchat_packet_with_recipient(
+                    self.my_peer_id,
+                    target_peer_id,
+                    MessageType.NOISE_ENCRYPTED,
+                    encrypted,
+                    None,
+                    self
+                )
+                
+                debug_println(f"[PRIVATE] Final outer packet: {len(packet)} bytes")
+                debug_println(f"[PRIVATE] Final packet hex: {packet.hex()}")
+                
+                # Send the packet - if this fails, the nonce is already incremented
+                await self.send_packet(packet)
+                debug_println(f"[PRIVATE] Successfully sent encrypted message on attempt {attempt + 1}")
+                return  # Success!
+                
+            except Exception as e:
+                if "could not complete without blocking" in str(e) and attempt < max_retries - 1:
+                    debug_println(f"[PRIVATE] BLE congestion on attempt {attempt + 1}, will retry")
+                    # Just wait and retry - don't reset the session as the message might have been delivered
+                    await asyncio.sleep(0.5)
+                else:
+                    # Non-recoverable error or max retries reached
+                    debug_println(f"[PRIVATE] Failed to send message after {attempt + 1} attempts: {e}")
+                    raise e
         
     async def find_device(self) -> Optional[BLEDevice]:
         """Scan for BitChat service"""
@@ -2913,24 +2924,33 @@ def parse_bitchat_message_payload(data: bytes) -> BitchatMessage:
 
     return BitchatMessage(id_str, content, channel, is_encrypted, encrypted_content)
 
-def create_bitchat_packet(sender_id: str, msg_type: MessageType, payload: bytes) -> bytes:
+def create_bitchat_packet(sender_id: str, msg_type: MessageType, payload: bytes, client=None) -> bytes:
     """Create a BitChat packet"""
-    return create_bitchat_packet_with_recipient(sender_id, None, msg_type, payload, None)
+    return create_bitchat_packet_with_recipient(sender_id, None, msg_type, payload, None, client)
 
 def create_bitchat_packet_with_signature(sender_id: str, msg_type: MessageType, 
-                                        payload: bytes, signature: Optional[bytes]) -> bytes:
+                                        payload: bytes, signature: Optional[bytes], client=None) -> bytes:
     """Create a BitChat packet with signature"""
-    return create_bitchat_packet_with_recipient(sender_id, None, msg_type, payload, signature)
+    return create_bitchat_packet_with_recipient(sender_id, None, msg_type, payload, signature, client)
 
 def create_bitchat_packet_with_recipient_and_signature(sender_id: str, recipient_id: str,
                                                       msg_type: MessageType, payload: bytes,
-                                                      signature: Optional[bytes]) -> bytes:
+                                                      signature: Optional[bytes], client=None) -> bytes:
     """Create a BitChat packet with recipient and signature"""
-    return create_bitchat_packet_with_recipient(sender_id, recipient_id, msg_type, payload, signature)
+    return create_bitchat_packet_with_recipient(sender_id, recipient_id, msg_type, payload, signature, client)
+
+# Global sequence counter for packet creation when no client instance is available
+_global_sequence_counter = int(time.time() * 1000) & 0xFFFFFFFF
+
+def _get_next_global_sequence() -> int:
+    """Get next global sequence number"""
+    global _global_sequence_counter
+    _global_sequence_counter = (_global_sequence_counter + 1) & 0xFFFFFFFF
+    return _global_sequence_counter
 
 def create_bitchat_packet_with_recipient(sender_id: str, recipient_id: Optional[str],
                                        msg_type: MessageType, payload: bytes,
-                                       signature: Optional[bytes]) -> bytes:
+                                       signature: Optional[bytes], client=None) -> bytes:
     """Create a BitChat packet with all options"""
     debug_full_println(f"[RAW SEND] Creating packet: type={msg_type.name}, payload_len={len(payload)}")
     
@@ -2950,8 +2970,11 @@ def create_bitchat_packet_with_recipient(sender_id: str, recipient_id: Optional[
     timestamp_ms = int(time.time() * 1000)
     packet.extend(struct.pack('>Q', timestamp_ms))
     
-    # Sequence number (4 bytes) - new field, using timestamp as sequence for now
-    sequence_number = int(time.time() * 1000) & 0xFFFFFFFF  # Use lower 32 bits of timestamp
+    # Sequence number (4 bytes) - use client's sequence counter or global counter
+    if client and hasattr(client, 'get_next_sequence_number'):
+        sequence_number = client.get_next_sequence_number()
+    else:
+        sequence_number = _get_next_global_sequence()
     packet.extend(struct.pack('>I', sequence_number))
     
     # Flags
