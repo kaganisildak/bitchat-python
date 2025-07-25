@@ -320,47 +320,47 @@ class BitchatClient:
         # Track for delivery
         self.delivery_tracker.track_message(msg_id, content, True)
         
-        # Retry loop for BLE congestion - handle encryption AND sending together
+        # Create INNER packet (BitchatPacket with MESSAGE type) that will be encrypted
+        inner_packet = create_bitchat_packet_with_recipient(
+            self.my_peer_id,
+            target_peer_id,
+            MessageType.MESSAGE,
+            payload,
+            None,
+            self
+        )
+        
+        # Set TTL for inner packet
+        inner_packet_data = bytearray(inner_packet)
+        inner_packet_data[2] = 7  # TTL for inner packet
+        inner_packet = bytes(inner_packet_data)
+        
+        debug_println(f"[PRIVATE] Created inner packet: {len(inner_packet)} bytes")
+        debug_println(f"[PRIVATE] Inner packet hex: {inner_packet.hex()}")
+        
+        # Encrypt the ENTIRE inner packet using Noise (this increments nonce ONCE)
+        encrypted = self.encryption_service.encrypt_for_peer(target_peer_id, inner_packet)
+        debug_println(f"[PRIVATE] Encrypted inner packet: {len(encrypted)} bytes")
+        debug_println(f"[PRIVATE] Encrypted hex: {encrypted.hex()}")
+        
+        # Create outer Noise encrypted packet
+        packet = create_bitchat_packet_with_recipient(
+            self.my_peer_id,
+            target_peer_id,
+            MessageType.NOISE_ENCRYPTED,
+            encrypted,
+            None,
+            self
+        )
+        
+        debug_println(f"[PRIVATE] Final outer packet: {len(packet)} bytes")
+        debug_println(f"[PRIVATE] Final packet hex: {packet.hex()}")
+        
+        # Retry loop for BLE congestion - only retry the packet sending
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                # Create INNER packet (BitchatPacket with MESSAGE type) that will be encrypted
-                inner_packet = create_bitchat_packet_with_recipient(
-                    self.my_peer_id,
-                    target_peer_id,
-                    MessageType.MESSAGE,
-                    payload,
-                    None,
-                    self
-                )
-                
-                # Set TTL for inner packet
-                inner_packet_data = bytearray(inner_packet)
-                inner_packet_data[2] = 7  # TTL for inner packet
-                inner_packet = bytes(inner_packet_data)
-                
-                debug_println(f"[PRIVATE] Created inner packet: {len(inner_packet)} bytes")
-                debug_println(f"[PRIVATE] Inner packet hex: {inner_packet.hex()}")
-                
-                # Encrypt the ENTIRE inner packet using Noise (this increments nonce)
-                encrypted = self.encryption_service.encrypt_for_peer(target_peer_id, inner_packet)
-                debug_println(f"[PRIVATE] Encrypted inner packet: {len(encrypted)} bytes (attempt {attempt + 1})")
-                debug_println(f"[PRIVATE] Encrypted hex: {encrypted.hex()}")
-                
-                # Create outer Noise encrypted packet
-                packet = create_bitchat_packet_with_recipient(
-                    self.my_peer_id,
-                    target_peer_id,
-                    MessageType.NOISE_ENCRYPTED,
-                    encrypted,
-                    None,
-                    self
-                )
-                
-                debug_println(f"[PRIVATE] Final outer packet: {len(packet)} bytes")
-                debug_println(f"[PRIVATE] Final packet hex: {packet.hex()}")
-                
-                # Send the packet - if this fails, the nonce is already incremented
+                # Send the packet - nonce was already incremented during encryption
                 await self.send_packet(packet)
                 debug_println(f"[PRIVATE] Successfully sent encrypted message on attempt {attempt + 1}")
                 return  # Success!
@@ -758,6 +758,10 @@ class BitchatClient:
             await self.handle_noise_identity_announce(packet)
         elif packet.msg_type == MessageType.PROTOCOL_NACK:
             await self.handle_protocol_nack(packet)
+        elif packet.msg_type == MessageType.READ_RECEIPT:
+            await self.handle_read_receipt(packet)
+        elif packet.msg_type == MessageType.DELIVERY_ACK:
+            await self.handle_delivery_ack(packet, raw_data)
         elif packet.msg_type in [MessageType.PROTOCOL_ACK, MessageType.SYSTEM_VALIDATION, MessageType.VERSION_HELLO, MessageType.VERSION_ACK]:
             # Handle other protocol messages gracefully
             debug_println(f"[PROTOCOL] Received {packet.msg_type.name} from {packet.sender_id_str}")
@@ -1167,7 +1171,7 @@ class BitchatClient:
                     if inner_packet:
                         debug_println(f"[NOISE] Decrypted inner packet: type={inner_packet.msg_type.name if hasattr(inner_packet.msg_type, 'name') else inner_packet.msg_type}, sender={inner_packet.sender_id_str}")
                         
-                        # Verify this is a MESSAGE packet (as created by Swift)
+                        # Handle different types of inner packets
                         if inner_packet.msg_type == MessageType.MESSAGE:
                             # Parse the message payload from the inner packet
                             try:
@@ -1188,9 +1192,16 @@ class BitchatClient:
                                     
                             except Exception as e:
                                 debug_println(f"[NOISE] Failed to parse inner message payload: {e}")
+                        elif inner_packet.msg_type == MessageType.READ_RECEIPT:
+                            debug_println(f"[NOISE] Received read receipt from {packet.sender_id_str}")
+                            # Read receipts are just acknowledgments, we can safely ignore them for now
+                            # In a full implementation, we might update message status in the UI
+                        elif inner_packet.msg_type == MessageType.DELIVERY_ACK:
+                            debug_println(f"[NOISE] Received delivery ACK from {packet.sender_id_str}")
+                            # Handle delivery acknowledgments if needed
                         else:
-                            debug_println(f"[NOISE] Unexpected inner packet type: {inner_packet.msg_type}, expected MESSAGE")
-                            # Handle other types of inner packets if needed
+                            debug_println(f"[NOISE] Received inner packet type: {inner_packet.msg_type.name}")
+                            # Handle other types of inner packets by forwarding to main handler
                             await self.handle_packet(inner_packet, decrypted_payload)
                     else:
                         debug_println(f"[NOISE] Failed to parse decrypted data as BitchatPacket")
@@ -1230,7 +1241,6 @@ class BitchatClient:
                         
                         # Check if this could be a padded message that needs unpadding
                         try:
-                            from compression import unpad_message
                             unpadded = unpad_message(decrypted_payload)
                             debug_println(f"[NOISE] Trying unpadded data: {len(unpadded)} bytes")
                             if len(unpadded) > 0 and unpadded[0] == 1:
@@ -1370,6 +1380,13 @@ class BitchatClient:
             
             self.chat_context.add_channel(channel)
             await self.save_app_state()
+    
+    async def handle_read_receipt(self, packet: BitchatPacket):
+        """Handle read receipt"""
+        debug_println(f"[READ_RECEIPT] Received read receipt from {packet.sender_id_str}")
+        # Read receipts are acknowledgments that a message was read
+        # In a full implementation, we might update message status in the UI
+        # For now, we just log them
     
     async def handle_delivery_ack(self, packet: BitchatPacket, raw_data: bytes):
         """Handle delivery acknowledgment"""
@@ -3120,16 +3137,34 @@ def create_bitchat_message_payload_full(sender: str, content: str, channel: Opti
     return (bytes(data), message_id)
 
 def unpad_message(data: bytes) -> bytes:
-    """Remove PKCS#7 padding"""
+    """Remove various types of padding and find BitchatPacket"""
     if not data:
         return data
     
+    # First try PKCS#7 padding
     padding_length = data[-1]
+    if padding_length > 0 and padding_length <= len(data) and padding_length <= 255:
+        # Verify PKCS#7 padding by checking if all padding bytes are the same
+        padding_bytes = data[-padding_length:]
+        if all(b == padding_length for b in padding_bytes):
+            pkcs7_result = data[:-padding_length]
+            if len(pkcs7_result) > 0 and pkcs7_result[0] == 1:
+                return pkcs7_result
     
-    if padding_length == 0 or padding_length > len(data) or padding_length > 255:
-        return data
+    # If PKCS#7 didn't work, try to find the start of a BitchatPacket (version 1)
+    for i in range(min(50, len(data))):  # Look at first 50 bytes max
+        if data[i] == 1:  # Found potential version byte
+            candidate = data[i:]
+            if len(candidate) >= 17:  # Minimum packet size
+                # Basic validation: check if it looks like a valid packet structure
+                # BitchatPacket: [version(1), msg_type(1), ttl(1), seq(4), sender(8), recipient(8), payload...]
+                if len(candidate) >= 17:
+                    msg_type = candidate[1]
+                    if 1 <= msg_type <= 30:  # Valid message type range
+                        return candidate
     
-    return data[:-padding_length]
+    # If we can't find a valid packet, return original data
+    return data
 
 def create_encrypted_channel_message_payload(sender: str, content: str, channel: str, key: bytes, encryption_service, sender_peer_id: str) -> Tuple[bytes, str]:
     """Create encrypted channel message payload"""
