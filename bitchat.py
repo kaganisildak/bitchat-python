@@ -1164,50 +1164,75 @@ class BitchatClient:
             # Swift creates: BitchatPacket(type: MessageType.message, ...) and encrypts the whole packet
             
             try:
+                # First try to parse as a complete BitchatPacket directly
+                inner_packet = None
+                
                 # Check if the decrypted data starts with version 1 (BitchatPacket)
                 if len(decrypted_payload) > 0 and decrypted_payload[0] == 1:
-                    # Parse the decrypted data as a complete BitchatPacket
+                    debug_println(f"[NOISE] Data starts with version 1, parsing as BitchatPacket")
                     inner_packet = parse_bitchat_packet(decrypted_payload)
-                    if inner_packet:
-                        debug_println(f"[NOISE] Decrypted inner packet: type={inner_packet.msg_type.name if hasattr(inner_packet.msg_type, 'name') else inner_packet.msg_type}, sender={inner_packet.sender_id_str}")
-                        
-                        # Handle different types of inner packets
-                        if inner_packet.msg_type == MessageType.MESSAGE:
-                            # Parse the message payload from the inner packet
-                            try:
-                                message = parse_bitchat_message_payload(inner_packet.payload)
-                                
-                                # Check for duplicates
-                                if message.id not in self.processed_messages:
-                                    self.bloom.add(message.id)
-                                    self.processed_messages.add(message.id)
-                                    
-                                    # Display the message as private
-                                    await self.display_message(message, packet, True)
-                                    
-                                    # Temporarily disable ACKs for encrypted messages to avoid retransmission issues
-                                    # await self.send_delivery_ack(message.id, packet.sender_id_str, True)
-                                else:
-                                    debug_println(f"[DUPLICATE] Ignoring duplicate encrypted message: {message.id}")
-                                    
-                            except Exception as e:
-                                debug_println(f"[NOISE] Failed to parse inner message payload: {e}")
-                        elif inner_packet.msg_type == MessageType.READ_RECEIPT:
-                            debug_println(f"[NOISE] Received read receipt from {packet.sender_id_str}")
-                            # Read receipts are just acknowledgments, we can safely ignore them for now
-                            # In a full implementation, we might update message status in the UI
-                        elif inner_packet.msg_type == MessageType.DELIVERY_ACK:
-                            debug_println(f"[NOISE] Received delivery ACK from {packet.sender_id_str}")
-                            # Handle delivery acknowledgments if needed
-                        else:
-                            debug_println(f"[NOISE] Received inner packet type: {inner_packet.msg_type.name}")
-                            # Handle other types of inner packets by forwarding to main handler
-                            await self.handle_packet(inner_packet, decrypted_payload)
-                    else:
-                        debug_println(f"[NOISE] Failed to parse decrypted data as BitchatPacket")
                 else:
-                    # Handle non-BitchatPacket data (likely JSON acknowledgments or receipts)
-                    debug_println(f"[NOISE] Decrypted data does not start with version 1, likely acknowledgment/receipt")
+                    # Data doesn't start with version 1, might be padded or different format
+                    debug_println(f"[NOISE] Data doesn't start with version 1, first byte: 0x{decrypted_payload[0]:02x}")
+                    
+                    # Try unpadding first
+                    try:
+                        unpadded = unpad_message(decrypted_payload)
+                        debug_println(f"[NOISE] Unpadded data: {len(unpadded)} bytes, first byte: 0x{unpadded[0]:02x if len(unpadded) > 0 else 0}")
+                        if len(unpadded) > 0 and unpadded[0] == 1:
+                            debug_println(f"[NOISE] Unpadded data starts with version 1")
+                            inner_packet = parse_bitchat_packet(unpadded)
+                        else:
+                            # Still doesn't start with version 1, try direct parsing anyway
+                            debug_println(f"[NOISE] Trying direct parse of unpadded data")
+                            inner_packet = parse_bitchat_packet(unpadded)
+                    except Exception as unpad_e:
+                        debug_println(f"[NOISE] Unpadding failed: {unpad_e}, trying original data")
+                        # Try parsing original data directly
+                        try:
+                            inner_packet = parse_bitchat_packet(decrypted_payload)
+                        except Exception as direct_e:
+                            debug_println(f"[NOISE] Direct parsing of original data failed: {direct_e}")
+                
+                # If we successfully parsed a packet, handle it
+                if inner_packet:
+                    debug_println(f"[NOISE] Decrypted inner packet: type={inner_packet.msg_type.name if hasattr(inner_packet.msg_type, 'name') else inner_packet.msg_type}, sender={inner_packet.sender_id_str}")
+                    
+                    # Handle different types of inner packets
+                    if inner_packet.msg_type == MessageType.MESSAGE:
+                        # Parse the message payload from the inner packet
+                        try:
+                            message = parse_bitchat_message_payload(inner_packet.payload)
+                            
+                            # Check for duplicates
+                            if message.id not in self.processed_messages:
+                                self.bloom.add(message.id)
+                                self.processed_messages.add(message.id)
+                                
+                                # Display the message as private
+                                await self.display_message(message, packet, True)
+                                
+                                # Temporarily disable ACKs for encrypted messages to avoid retransmission issues
+                                # await self.send_delivery_ack(message.id, packet.sender_id_str, True)
+                            else:
+                                debug_println(f"[DUPLICATE] Ignoring duplicate encrypted message: {message.id}")
+                                
+                        except Exception as e:
+                            debug_println(f"[NOISE] Failed to parse inner message payload: {e}")
+                    elif inner_packet.msg_type == MessageType.READ_RECEIPT:
+                        debug_println(f"[NOISE] Received read receipt from {packet.sender_id_str}")
+                        # Read receipts are just acknowledgments, we can safely ignore them for now
+                        # In a full implementation, we might update message status in the UI
+                    elif inner_packet.msg_type == MessageType.DELIVERY_ACK:
+                        debug_println(f"[NOISE] Received delivery ACK from {packet.sender_id_str}")
+                        # Handle delivery acknowledgments if needed
+                    else:
+                        debug_println(f"[NOISE] Received inner packet type: {inner_packet.msg_type.name}")
+                        # Handle other types of inner packets by forwarding to main handler
+                        await self.handle_packet(inner_packet, decrypted_payload)
+                else:
+                    # Failed to parse as BitchatPacket, try alternative formats
+                    debug_println(f"[NOISE] Failed to parse decrypted data as BitchatPacket")
                     debug_println(f"[NOISE] Decrypted data hex: {decrypted_payload.hex()}")
                     debug_println(f"[NOISE] First 10 bytes: {decrypted_payload[:10]}")
                     
@@ -1223,38 +1248,8 @@ class BitchatClient:
                             debug_println(f"[NOISE] Unknown decrypted data format: {data_str[:100]}...")
                     except Exception as json_e:
                         debug_println(f"[NOISE] Failed to parse as JSON acknowledgment: {json_e}")
-                        # Try to check if this might be a different packet format
-                        if len(decrypted_payload) > 0:
-                            first_byte = decrypted_payload[0]
-                            debug_println(f"[NOISE] First byte is 0x{first_byte:02x} (expected 0x01 for BitchatPacket)")
-                            
-                            # Check if this might be raw message data
-                            if first_byte < 0x20:  # Control characters
-                                debug_println(f"[NOISE] Data starts with control character, might be binary protocol")
-                            else:
-                                try:
-                                    # Try to decode as text to see if it's readable
-                                    text_attempt = decrypted_payload.decode('utf-8', errors='replace')
-                                    debug_println(f"[NOISE] Decoded as text (with replacements): {text_attempt[:100]}...")
-                                except:
-                                    debug_println(f"[NOISE] Cannot decode as text")
-                        
-                        # Check if this could be a padded message that needs unpadding
-                        try:
-                            unpadded = unpad_message(decrypted_payload)
-                            debug_println(f"[NOISE] Trying unpadded data: {len(unpadded)} bytes")
-                            if len(unpadded) > 0 and unpadded[0] == 1:
-                                debug_println(f"[NOISE] Unpadded data starts with version 1, trying to parse as BitchatPacket")
-                                try:
-                                    unpadded_packet = parse_bitchat_packet(unpadded)
-                                    if unpadded_packet:
-                                        debug_println(f"[NOISE] Successfully parsed unpadded packet: type={unpadded_packet.msg_type}")
-                                        await self.handle_packet(unpadded_packet, unpadded)
-                                        return
-                                except Exception as unpad_parse_e:
-                                    debug_println(f"[NOISE] Failed to parse unpadded packet: {unpad_parse_e}")
-                        except Exception as unpad_e:
-                            debug_println(f"[NOISE] Unpadding failed: {unpad_e}")
+                        # Already tried comprehensive parsing above, this data format is unsupported
+                        debug_println(f"[NOISE] Unsupported decrypted data format")
                         
             except Exception as e:
                 debug_println(f"[NOISE] Error parsing decrypted inner packet: {e}")
