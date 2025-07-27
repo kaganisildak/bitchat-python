@@ -16,13 +16,13 @@ from pathlib import Path
 from random import randint
 from typing import Optional, Dict, List, Tuple, Set
 
-import aioconsole  # type: ignore[import-untyped]
 from bleak import BleakClient, BleakScanner, BleakGATTCharacteristic
 from bleak.backends.device import BLEDevice
 from pybloom_live import BloomFilter  # type: ignore[import-untyped]
 
 from bitchat_python._logger import logger, enable_file_logging
 from bitchat_python._version import __version__
+from bitchat_python._compat import ainput
 from bitchat_python.compression import decompress
 from bitchat_python.encryption import EncryptionService, NoiseError
 from bitchat_python.persistence import (
@@ -1921,7 +1921,7 @@ class BitchatClient:
 
         if line == "/switch":
             print(f"\n{self.chat_context.get_conversation_list_with_numbers()}")
-            switch_input = await aioconsole.ainput("Enter number to switch to: ")
+            switch_input = await ainput("Enter number to switch to: ")
             if switch_input.strip().isdigit():
                 num = int(switch_input.strip())
                 if self.chat_context.switch_to_number(num):
@@ -2936,7 +2936,7 @@ class BitchatClient:
         """Handle user input asynchronously"""
         while self.running:
             try:
-                line = await aioconsole.ainput("> ")
+                line = await ainput("> ")
                 await self.handle_user_input(line)
             except KeyboardInterrupt:
                 self.running = False

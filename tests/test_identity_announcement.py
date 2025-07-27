@@ -4,18 +4,20 @@
 Test script for Noise Identity Announcement binary encoding/decoding
 """
 
-import time
 import os
+import time
+
+import pytest
 
 
 def encode_noise_identity_announcement_binary(
-    peer_id: str,
-    public_key: bytes,
-    signing_public_key: bytes,
-    nickname: str,
-    timestamp: int,
-    signature: bytes,
-    previous_peer_id: str = None,
+        peer_id: str,
+        public_key: bytes,
+        signing_public_key: bytes,
+        nickname: str,
+        timestamp: int,
+        signature: bytes,
+        previous_peer_id: str = None,
 ) -> bytes:
     """Encode noise identity announcement to binary format matching iOS"""
     data = bytearray()
@@ -74,47 +76,47 @@ def parse_noise_identity_announcement_binary(data: bytes) -> dict:
     # Read peerID (8 bytes)
     if offset + 8 > len(data):
         raise ValueError("Insufficient data for peerID")
-    peer_id_bytes = data[offset : offset + 8]
+    peer_id_bytes = data[offset: offset + 8]
     peer_id = peer_id_bytes.hex()
     offset += 8
 
     # Read publicKey (length-prefixed)
     if offset + 4 > len(data):
         raise ValueError("Insufficient data for publicKey length")
-    public_key_len = int.from_bytes(data[offset : offset + 4], "little")
+    public_key_len = int.from_bytes(data[offset: offset + 4], "little")
     offset += 4
 
     if offset + public_key_len > len(data):
         raise ValueError("Insufficient data for publicKey")
-    public_key = data[offset : offset + public_key_len]
+    public_key = data[offset: offset + public_key_len]
     offset += public_key_len
 
     # Read signingPublicKey (length-prefixed)
     if offset + 4 > len(data):
         raise ValueError("Insufficient data for signingPublicKey length")
-    signing_key_len = int.from_bytes(data[offset : offset + 4], "little")
+    signing_key_len = int.from_bytes(data[offset: offset + 4], "little")
     offset += 4
 
     if offset + signing_key_len > len(data):
         raise ValueError("Insufficient data for signingPublicKey")
-    signing_public_key = data[offset : offset + signing_key_len]
+    signing_public_key = data[offset: offset + signing_key_len]
     offset += signing_key_len
 
     # Read nickname (length-prefixed string)
     if offset + 4 > len(data):
         raise ValueError("Insufficient data for nickname length")
-    nickname_len = int.from_bytes(data[offset : offset + 4], "little")
+    nickname_len = int.from_bytes(data[offset: offset + 4], "little")
     offset += 4
 
     if offset + nickname_len > len(data):
         raise ValueError("Insufficient data for nickname")
-    nickname = data[offset : offset + nickname_len].decode("utf-8")
+    nickname = data[offset: offset + nickname_len].decode("utf-8")
     offset += nickname_len
 
     # Read timestamp (8 bytes)
     if offset + 8 > len(data):
         raise ValueError("Insufficient data for timestamp")
-    timestamp = int.from_bytes(data[offset : offset + 8], "little")
+    timestamp = int.from_bytes(data[offset: offset + 8], "little")
     offset += 8
 
     # Read previousPeerID if present
@@ -122,7 +124,7 @@ def parse_noise_identity_announcement_binary(data: bytes) -> dict:
     if has_previous_peer_id:
         if offset + 8 > len(data):
             raise ValueError("Insufficient data for previousPeerID")
-        prev_peer_bytes = data[offset : offset + 8]
+        prev_peer_bytes = data[offset: offset + 8]
         previous_peer_id = prev_peer_bytes.hex()
         offset += 8
 
@@ -170,8 +172,7 @@ def test_identity_announcement():
         print(f"\n✓ Encoding successful: {len(encoded)} bytes")
         print(f"  First 32 bytes: {encoded[:32].hex()}")
     except Exception as e:
-        print(f"✗ Encoding failed: {e}")
-        return False
+        pytest.fail(f"✗ Encoding failed: {e}")
 
     # Test decoding
     try:
@@ -184,45 +185,35 @@ def test_identity_announcement():
         print(f"  Decoded Signing Key: {decoded['signingPublicKey'][:32]}...")
         print(f"  Decoded Signature: {decoded['signature'][:32]}...")
     except Exception as e:
-        print(f"✗ Decoding failed: {e}")
-        return False
+        pytest.fail(f"✗ Decoding failed: {e}")
 
     # Verify round-trip
     print(f"\nVerifying round-trip...")
     success = True
 
     if decoded["peerID"] != peer_id:
-        print(f"✗ Peer ID mismatch: {decoded['peerID']} != {peer_id}")
-        success = False
+        pytest.fail(f"✗ Peer ID mismatch: {decoded['peerID']} != {peer_id}")
 
     if decoded["publicKey"] != public_key.hex():
-        print(f"✗ Public key mismatch")
-        success = False
+        pytest.fail(f"✗ Public key mismatch")
 
     if decoded["signingPublicKey"] != signing_public_key.hex():
-        print(f"✗ Signing public key mismatch")
-        success = False
+        pytest.fail(f"✗ Signing public key mismatch")
 
     if decoded["nickname"] != nickname:
-        print(f"✗ Nickname mismatch: {decoded['nickname']} != {nickname}")
-        success = False
+        pytest.fail(f"✗ Nickname mismatch: {decoded['nickname']} != {nickname}")
 
     if decoded["timestamp"] != timestamp:
-        print(f"✗ Timestamp mismatch: {decoded['timestamp']} != {timestamp}")
-        success = False
+        pytest.fail(f"✗ Timestamp mismatch: {decoded['timestamp']} != {timestamp}")
 
     if decoded["signature"] != signature.hex():
-        print(f"✗ Signature mismatch")
-        success = False
+        pytest.fail(f"✗ Signature mismatch")
 
     if decoded["previousPeerID"] is not None:
-        print(f"✗ Previous peer ID should be None, got: {decoded['previousPeerID']}")
-        success = False
+        pytest.fail(f"✗ Previous peer ID should be None, got: {decoded['previousPeerID']}")
 
     if success:
         print("✓ Round-trip verification successful!")
-
-    return success
 
 
 def test_with_previous_peer_id():
@@ -257,30 +248,28 @@ def test_with_previous_peer_id():
 
         # Verify
         if decoded["previousPeerID"] != previous_peer_id:
-            print(
+            pytest.fail(
                 f"✗ Previous peer ID mismatch: {decoded['previousPeerID']} != {previous_peer_id}"
             )
-            return False
 
         print(f"✓ Previous peer ID correctly preserved: {decoded['previousPeerID']}")
-        return True
 
     except Exception as e:
-        print(f"✗ Test with previous peer ID failed: {e}")
-        return False
+        pytest.fail(f"✗ Test with previous peer ID failed: {e}")
 
-
-if __name__ == "__main__":
-    print("=" * 60)
-    print("Noise Identity Announcement Binary Format Test")
-    print("=" * 60)
-
-    success1 = test_identity_announcement()
-    success2 = test_with_previous_peer_id()
-
-    print("\n" + "=" * 60)
-    if success1 and success2:
-        print("🎉 All tests passed!")
-    else:
-        print("❌ Some tests failed!")
-    print("=" * 60)
+# # NOTE: commented because of `pytest` usage
+#
+# if __name__ == "__main__":
+#     print("=" * 60)
+#     print("Noise Identity Announcement Binary Format Test")
+#     print("=" * 60)
+#
+#     success1 = test_identity_announcement()
+#     success2 = test_with_previous_peer_id()
+#
+#     print("\n" + "=" * 60)
+#     if success1 and success2:
+#         print("🎉 All tests passed!")
+#     else:
+#         print("❌ Some tests failed!")
+#     print("=" * 60)

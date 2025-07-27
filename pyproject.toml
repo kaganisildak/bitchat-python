@@ -62,9 +62,9 @@ version_file = "VERSION.txt"
 bitchat-python = "bitchat_python.__main__:main"
 
 
-# # uncomment to configure pytest
-#[tool.pytest]
-#testpaths = ["tests"]
+# uncomment to configure pytest
+[tool.pytest]
+testpaths = ["tests"]
 
 [tool.mypy]
 packages = ["bitchat_python"]
@@ -81,7 +81,7 @@ extend-exclude = ["__init__.py"]
 [dependency-groups]
 dev = [
     "mypy>=1.15.0",
+    "pytest>=8.4.1",
     "ruff>=0.12.1",
-#    "pytest>=8.4.1",
-#    "pytest-cov>=6.2.1",
+    #    "pytest-cov>=6.2.1",
 ]

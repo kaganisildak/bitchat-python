@@ -18,6 +18,8 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import (
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from cryptography.hazmat.primitives.hmac import HMAC
 
+from bitchat_python._logger import logger
+
 # Noise Protocol Constants
 NOISE_PROTOCOL_NAME = "Noise_XX_25519_ChaChaPoly_SHA256"
 NOISE_DH_LEN = 32  # Curve25519 key size
@@ -465,6 +467,7 @@ class NoiseCipherState:
             # print(f"[NOISE] NoiseCipher.decrypt: SUCCESS, plaintext_len={len(plaintext)}")
             return plaintext
         except Exception as e:
+            logger.debug(f"Error decrypting ciphertext: {e}")
             # print(f"[NOISE] NoiseCipher.decrypt: FAILED with {type(e).__name__}: {e}")
             # print(f"[NOISE] NoiseCipher.decrypt: key={self.key.hex()[:32]}...")
             # Increment nonce even on failure to maintain sync (Noise protocol requirement)
