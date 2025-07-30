@@ -36,7 +36,7 @@ dependencies = [
 ]
 
 [project.scripts]
-bitchat = "bitchat"
+bitchat-python = "bitchat:run"
 
 [tool.setuptools]
 py-modules = ["bitchat", "encryption", "compression", "fragmentation", "terminal_ux", "persistence"]

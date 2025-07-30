@@ -2034,8 +2034,12 @@ async def main():
     client = BitchatClient()
     await client.run()
 
-if __name__ == "__main__":
+def run():
+    """Entry point for console scripts"""
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
         print("\n[+] Exiting...")
+
+if __name__ == "__main__":
+    run()
