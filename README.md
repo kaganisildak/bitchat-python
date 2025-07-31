@@ -41,7 +41,7 @@ General Commands
 * `/status`             : Show connection info
 * `/clear`              : Clear the screen
 * `/exit`               : Quit BitChat
-*  `/q`                 : Alias for /exit
+* `/q`                 : Alias for /exit
 
 
 Navigation Commands
