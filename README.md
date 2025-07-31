@@ -15,7 +15,10 @@ A Python implementation of the BitChat decentralized, peer-to-peer, encrypted ch
   * [Build](#build-sdist-and-wheel)
 
 
-
+## Installation
+```Shell
+pip install bleak>=0.22.3 cryptography>=44.0.0 lz4>=4.3.3 aioconsole>=0.8.1 pybloom-live>=4.0.0 
+```
 ## Usage
 
 ### Simple start
@@ -38,7 +41,7 @@ General Commands
 * `/status`             : Show connection info
 * `/clear`              : Clear the screen
 * `/exit`               : Quit BitChat
-*  `/q`                 : Alias for /exit
+* `/q`                 : Alias for /exit
 
 
 Navigation Commands
