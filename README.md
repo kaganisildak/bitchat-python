@@ -2,7 +2,7 @@
 
 A Python implementation of the BitChat decentralized, peer-to-peer, encrypted chat application over BLE.
 
-*This project is rewrite of the [original Rust-based `bitchat-terminal`](https://github.com/ShilohEye/bitchat-terminal).*
+*This project is a rewrite of the [original Rust-based `bitchat-terminal`](https://github.com/ShilohEye/bitchat-terminal).*
 
 ## Table of contents
 * [Installation](#installation)
