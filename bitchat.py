@@ -1516,11 +1516,11 @@ class BitchatClient:
             return
         
         # Commands
-        if line == "/help":
+        if line == "/help" or line == "/h" or line == "/":
             print_help()
             return
         
-        if line == "/exit":
+        if line == "/exit" or line == "/q":
             # Send leave notification if connected
             if self.client and self.client.is_connected:
                 leave_packet = create_bitchat_packet(
